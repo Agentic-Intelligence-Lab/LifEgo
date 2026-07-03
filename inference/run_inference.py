@@ -159,30 +159,46 @@ def latch_objects(
     latches: dict,
     anchor_key: str,
     grasp_threshold: float = 0.5,
+    latch_dist_thresh: float = 0.20,
 ) -> Dict[str, ObjectState]:
     """Make a grasped object's pose follow the gripper.
 
-    When an arm closes, we lock the relative transform gripper->nearest-object;
-    while it stays closed, the object's pose is driven by the gripper. This keeps
-    the object token in the ICT consistent with what's physically happening even
-    if vision can't see the occluded object. (Simplified single-object latch.)
+    When an arm closes, we find the nearest object to the gripper and — only if it
+    is within ``latch_dist_thresh`` metres (i.e. we actually grasped something
+    nearby) — lock the relative transform gripper->object. While the arm stays
+    closed, that object's pose is driven by the gripper, keeping its ICT token
+    consistent with what is physically happening even when vision can't see the
+    occluded object.
 
-    The ANCHOR object is never latched — it defines the fixed object-centric
-    reference frame for the episode and must stay put.
+    This mirrors the training-time data generation (``preprocess/DatasetGen.py``):
+      - The nearest search includes ALL objects, the anchor included. In several
+        tasks the anchor IS the manipulated object (e.g. the bread in serve_bread),
+        so it must be latchable — excluding it would latch the wrong object.
+      - ``latch_dist_thresh`` mirrors the 0.20 m gate used during data generation.
+        Without it, closing the gripper with no object within reach would wrongly
+        latch the nearest distant object and drag its token along the gripper.
+    ``anchor_key`` is retained for call-site compatibility; it is no longer used to
+    exclude the anchor from latching.
     """
     dynamic = {k: ObjectState(v.T_in_cam.copy(), v.kpts_local) for k, v in static_objs.items()}
-    latchable = {k: v for k, v in static_objs.items() if k != anchor_key}
-    if not latchable:
+    if not static_objs:
         return dynamic
     for side, T_h in hands_in_cam.items():
         if T_h is None:
             continue
         closed = grippers.get(side, 0.0) > grasp_threshold
         if closed and latches.get(side) is None:
-            # latch onto the nearest (non-anchor) object at the moment of grasp
-            nearest = min(latchable, key=lambda k: np.linalg.norm(
-                latchable[k].T_in_cam[:3, 3] - T_h[:3, 3]))
-            latches[side] = (nearest, np.linalg.inv(T_h) @ latchable[nearest].T_in_cam)
+            # nearest object to the gripper at the moment of grasp (anchor included)
+            best_key, best_dist = None, float("inf")
+            for k, v in static_objs.items():
+                d = float(np.linalg.norm(v.T_in_cam[:3, 3] - T_h[:3, 3]))
+                if d < best_dist:
+                    best_dist, best_key = d, k
+            # only latch if we actually grasped something nearby (matches training's 0.20 m gate)
+            if best_key is not None and best_dist < latch_dist_thresh:
+                latches[side] = (best_key, np.linalg.inv(T_h) @ static_objs[best_key].T_in_cam)
+            else:
+                latches[side] = None
         elif not closed:
             latches[side] = None
         if latches.get(side) is not None:
@@ -205,6 +221,7 @@ def run(cfg_path: str, device: str = "cuda") -> None:
     cfg_sides = cfg["robot"]["sides"]                  # physical arms present, e.g. ["left","right"]
     T_align = np.array(cfg["robot"].get("T_align", np.eye(4).tolist()), dtype=np.float32)
     anchor_key = cfg["perception"].get("anchor_key", "obj1")
+    latch_dist_thresh = cfg["perception"].get("latch_dist_thresh", 0.20)  # match DatasetGen's 0.20 m gate
     exec_horizon = cfg["control"].get("exec_horizon", 8)   # steps run before re-planning
     dt = 1.0 / cfg["control"].get("control_hz", 10.0)
     done_threshold = cfg["control"].get("done_threshold", 0.8)
@@ -244,9 +261,11 @@ def run(cfg_path: str, device: str = "cuda") -> None:
             hands_in_cam = {s: arms[s].get_T_ee_in_cam() @ T_align for s in sides}
             grippers = {s: arms[s].get_gripper() for s in sides}
 
-            # grasped (non-anchor) objects follow the gripper
+            # grasped objects (anchor included, e.g. the bread in serve_bread)
+            # follow the gripper, gated by latch_dist_thresh
             objs = latch_objects(static_objs, hands_in_cam, grippers, latches,
-                                 anchor_key, controller.grasp_threshold)
+                                 anchor_key, controller.grasp_threshold,
+                                 latch_dist_thresh=latch_dist_thresh)
 
             # build the policy inputs: clean image, ICT, and (if region-attn) anchor UV
             clean = perception.make_clean_image(frame, hands_in_cam, grippers)
