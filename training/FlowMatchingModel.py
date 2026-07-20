@@ -420,13 +420,15 @@ class FlowMatchingModel(nn.Module):
         D = v_pred.shape[-1]
         w_dim = torch.ones((1, 1, D), device=v_pred.device, dtype=torch.float32)
 
-        # Apply strict routing for Manifold Dimensions
+        # Apply strict routing for Manifold Dimensions.
+        # Action layout is MODALITY-MAJOR (matches dataloader/inference/evaluator):
+        #   single: [pos(0:3), o6d(3:9), g(9:10)]
+        #   dual  : [L_pos,R_pos(0:6) | L_o6d,R_o6d(6:18) | L_g,R_g(18:20)]
         base_D = self.base_action_dim  # 10 or 20
-        if self.single_hand:
-            w_dim[..., 0:3], w_dim[..., 3:9], w_dim[..., 9:10] = w_p, w_r, w_g
-        else:
-            w_dim[..., 0:3], w_dim[..., 3:9], w_dim[..., 9:10] = w_p, w_r, w_g
-            w_dim[..., 10:13], w_dim[..., 13:19], w_dim[..., 19:20] = w_p, w_r, w_g
+        nh = self.num_hands
+        w_dim[..., 0 : nh*3]     = w_p   # all hands' positions
+        w_dim[..., nh*3 : nh*9]  = w_r   # all hands' rotations
+        w_dim[..., nh*9 : nh*10] = w_g   # all hands' grasps
 
         if self.use_aux_obj_dynamics:
             w_dim[..., base_D : base_D+3] = w_p * 0.5
@@ -444,14 +446,10 @@ class FlowMatchingModel(nn.Module):
         total_loss = w_flow * loss_flow
 
         # --- Extract individual raw MSE components for console logging ---
-        pos_diffs = [diff[..., 0:3]]
-        rot_diffs = [diff[..., 3:9]]
-        g_diffs = [diff[..., 9:10]]
-
-        if not self.single_hand:
-            pos_diffs.append(diff[..., 10:13])
-            rot_diffs.append(diff[..., 13:19])
-            g_diffs.append(diff[..., 19:20])
+        # MODALITY-MAJOR: pos / rot / grasp are each contiguous across all hands.
+        pos_diffs = [diff[..., 0 : nh*3]]
+        rot_diffs = [diff[..., nh*3 : nh*9]]
+        g_diffs   = [diff[..., nh*9 : nh*10]]
 
         if self.use_aux_obj_dynamics:
             pos_diffs.append(diff[..., base_D : base_D+3])
