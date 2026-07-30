@@ -185,7 +185,7 @@ def export_eef(args: argparse.Namespace) -> None:
             "camera_position_base_m": p_cam_in_base.tolist(),
             "assumption": (
                 "camera_target_base is the table point hit by the optical axis. "
-                "Default is robot base origin; replace it with measured calibration if needed."
+                "Defaults match patches/build_nero_mujoco_scene.py."
             ),
         },
         "T_align_hand_from_ee": T_align.tolist(),
@@ -275,13 +275,13 @@ def export_eef(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--session", default="outputs/ego_nero_easy")
-    parser.add_argument("--out", default="outputs/ego_nero_easy/robot_eef")
+    parser.add_argument("--out", default="outputs/ego_nero_easy/robot_eef_scene_camera")
     parser.add_argument("--hand-key", default="hand_r", choices=["hand_r", "hand_l"])
     parser.add_argument("--pose-key", default="midpoint_pose_opt_world")
     parser.add_argument("--camera-height-m", type=float, default=0.585)
     parser.add_argument("--pitch-down-deg", type=float, default=45.0)
     parser.add_argument("--optical-projection-base", nargs=3, type=float, default=[-1.0, 0.0, 0.0])
-    parser.add_argument("--camera-target-base", nargs=3, type=float, default=[0.0, 0.0, 0.0])
+    parser.add_argument("--camera-target-base", nargs=3, type=float, default=[-0.585, -0.45, 0.0])
     parser.add_argument("--t-align-json", default=None)
     args = parser.parse_args()
     export_eef(args)
