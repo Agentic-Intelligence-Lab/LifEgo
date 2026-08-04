@@ -32,23 +32,14 @@ if LOCAL_DILL_PARENT.is_dir() and str(LOCAL_DILL_PARENT) not in sys.path:
 from preprocess import WiLoRHands as wilor_hands_module
 
 
-DEFAULT_WILOR_CACHE = Path("/home/ymq/code/EgoLife/HumanEgo/.cache/wilor_mini")
-REQUIRED_WILOR_FILES = (
-    "MANO_RIGHT.pkl",
-    "detector.pt",
-    "mano_mean_params.npz",
-    "wilor_final.ckpt",
-)
+DEFAULT_WILOR_CACHE = REPO_ROOT / ".cache" / "wilor_mini"
 
 
 def resolve_wilor_pretrained_dir(cli_value: str | None) -> Path:
     if cli_value:
         return Path(cli_value)
 
-    if all((DEFAULT_WILOR_CACHE / "pretrained_models" / name).is_file() for name in REQUIRED_WILOR_FILES):
-        return DEFAULT_WILOR_CACHE
-
-    return REPO_ROOT / "patches" / "wilor_mini_cache"
+    return DEFAULT_WILOR_CACHE
 
 
 def configure_wilor_pretrained_dir(pretrained_dir: Path) -> None:

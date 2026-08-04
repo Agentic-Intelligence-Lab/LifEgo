@@ -307,8 +307,9 @@ def add_camera_setup(worldbody: ET.Element, camera_y: float, camera_height: floa
     ET.SubElement(worldbody, "site", {"name": "camera_table_intersection", "pos": fmt(target), "size": "0.018", "rgba": "0.1 0.35 1 1"})
 
 
-def load_real_flange_points() -> list[list[float]]:
-    path = REPO_ROOT / "examples" / "ego_nero_easy_real_bot.jsonl"
+def load_real_flange_points(path: Path | None) -> list[list[float]]:
+    if path is None:
+        return []
     if not path.is_file():
         return []
     pts = []
@@ -319,8 +320,9 @@ def load_real_flange_points() -> list[list[float]]:
     return pts
 
 
-def load_real_flange_poses() -> list[tuple[list[float], list[float]]]:
-    path = REPO_ROOT / "examples" / "ego_nero_easy_real_bot.jsonl"
+def load_real_flange_poses(path: Path | None) -> list[tuple[list[float], list[float]]]:
+    if path is None:
+        return []
     if not path.is_file():
         return []
     poses = []
@@ -380,6 +382,31 @@ def add_path_points(worldbody: ET.Element, name: str, pts: list[list[float]], rg
                 "rgba": rgba,
             },
         )
+
+
+def add_endpoint_sites(worldbody: ET.Element, name: str, pts: list[list[float]], start_rgba: str, end_rgba: str) -> None:
+    if not pts:
+        return
+    ET.SubElement(
+        worldbody,
+        "site",
+        {
+            "name": f"{name}_start",
+            "pos": fmt(pts[0]),
+            "size": "0.022",
+            "rgba": start_rgba,
+        },
+    )
+    ET.SubElement(
+        worldbody,
+        "site",
+        {
+            "name": f"{name}_end",
+            "pos": fmt(pts[-1]),
+            "size": "0.022",
+            "rgba": end_rgba,
+        },
+    )
 
 
 def add_pose_frame_body(
@@ -446,6 +473,11 @@ def build_scene(
     camera_y: float,
     camera_height: float,
     humanego_eef_path: Path,
+    realbot_path: Path | None,
+    real_path_every: int,
+    humanego_path_every: int,
+    real_frame_every: int,
+    humanego_frame_every: int,
 ) -> Path:
     links, _joints, children = load_urdf_model()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -482,10 +514,14 @@ def build_scene(
     add_humanego_eef_marker(worldbody, humanego_eef_path)
 
     if include_trajectories:
-        add_path_points(worldbody, "real_flange_path", load_real_flange_points(), "1 0.65 0.05 1", every=4)
-        add_path_points(worldbody, "humanego_eef_path", load_humanego_points(humanego_eef_path), "0.05 0.75 1 0.85", every=6)
-        add_pose_frames(worldbody, "real_flange_frame", load_real_flange_poses(), "1 0.65 0.05 1", every=8)
-        add_pose_frames(worldbody, "humanego_eef_frame", load_humanego_poses(humanego_eef_path), "0.05 0.75 1 1", every=12)
+        real_points = load_real_flange_points(realbot_path)
+        humanego_points = load_humanego_points(humanego_eef_path)
+        add_path_points(worldbody, "real_flange_path", real_points, "1 0.65 0.05 0.75", every=real_path_every)
+        add_path_points(worldbody, "humanego_eef_path", humanego_points, "0.05 0.75 1 0.75", every=humanego_path_every)
+        add_endpoint_sites(worldbody, "real_flange", real_points, "1 0.25 0.05 1", "1 0.95 0.05 1")
+        add_endpoint_sites(worldbody, "humanego_eef", humanego_points, "0.0 1.0 1.0 1", "0.25 0.1 1.0 1")
+        add_pose_frames(worldbody, "real_flange_frame", load_real_flange_poses(realbot_path), "1 0.65 0.05 1", every=real_frame_every)
+        add_pose_frames(worldbody, "humanego_eef_frame", load_humanego_poses(humanego_eef_path), "0.05 0.75 1 1", every=humanego_frame_every)
 
     actuator = ET.SubElement(root, "actuator")
     for joint in ZERO_QPOS:
@@ -510,7 +546,14 @@ def build_scene(
     return scene_path
 
 
-def write_readme(out_dir: Path, scene_path: Path, camera_y: float, camera_height: float, humanego_eef_path: Path) -> None:
+def write_readme(
+    out_dir: Path,
+    scene_path: Path,
+    camera_y: float,
+    camera_height: float,
+    humanego_eef_path: Path,
+    realbot_path: Path | None,
+) -> None:
     readme = f"""# Nero MuJoCo Scene
 
 Generated from `/home/ymq/code/agx_arm_urdf/nero`.
@@ -528,10 +571,12 @@ Scene convention:
 - Camera optical-axis table intersection is `[-{camera_height}, {camera_y}, 0]`, so its table projection points along base `-x`.
 
 Optional trajectory markers:
-- Yellow sites: real robot `flange_pose` samples from `examples/ego_nero_easy_real_bot.jsonl`.
+- Yellow sites: real robot `flange_pose` samples from `{realbot_path}`.
 - Cyan sites: HumanEgo/WiLoR exported EE samples from `{humanego_eef_path}`.
 - Small RGB triads: sampled orientation frames for both trajectories. The origin color
   distinguishes the source: yellow/orange for real flange, cyan for HumanEgo EEF.
+- Larger endpoint sites mark start/end: real start red-orange, real end yellow;
+  HumanEgo start cyan, HumanEgo end violet.
 
 Important frames:
 - `recorded_flange`: `link7` origin. This matches JSONL `poses.flange_pose`.
@@ -563,19 +608,30 @@ def main() -> None:
         "--humanego-eef",
         default="outputs/ego_nero_easy/robot_eef_scene_camera/robot_eef_trajectory.json",
     )
+    parser.add_argument("--realbot", default="examples/ego_nero_easy_real_bot.jsonl")
+    parser.add_argument("--real-path-every", type=int, default=4)
+    parser.add_argument("--humanego-path-every", type=int, default=6)
+    parser.add_argument("--real-frame-every", type=int, default=8)
+    parser.add_argument("--humanego-frame-every", type=int, default=12)
     parser.add_argument("--no-trajectories", action="store_true")
     args = parser.parse_args()
 
     out_dir = as_abs(args.out)
     humanego_eef_path = as_abs(args.humanego_eef)
+    realbot_path = None if args.realbot == "" else as_abs(args.realbot)
     scene_path = build_scene(
         out_dir=out_dir,
         include_trajectories=not args.no_trajectories,
         camera_y=args.camera_y,
         camera_height=args.camera_height,
         humanego_eef_path=humanego_eef_path,
+        realbot_path=realbot_path,
+        real_path_every=args.real_path_every,
+        humanego_path_every=args.humanego_path_every,
+        real_frame_every=args.real_frame_every,
+        humanego_frame_every=args.humanego_frame_every,
     )
-    write_readme(out_dir, scene_path, args.camera_y, args.camera_height, humanego_eef_path)
+    write_readme(out_dir, scene_path, args.camera_y, args.camera_height, humanego_eef_path, realbot_path)
     print(f"Wrote {scene_path}")
     print(f"Wrote {out_dir / 'README.md'}")
 
