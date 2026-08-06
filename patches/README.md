@@ -15,6 +15,8 @@ PY=/home/ymq/miniconda3/envs/lifego/bin/python
 
 ## 1. 使用 WiLoR 处理 RGB 视频
 
+export LD_LIBRARY_PATH=$(python -c "import torch, os; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))"):$LD_LIBRARY_PATH
+
 默认 WiLoR 权重目录：
 
 ```text
@@ -87,7 +89,7 @@ outputs/ego_nero_easy/robot_eef_scene_camera_axis_corrected/robot_eef_trajectory
 
 ```bash
 $PY patches/compare_realbot_humanego_eef.py \
-  --humanego outputs/ego_nero_easy/robot_eef_scene_camera/robot_eef_trajectory.json \
+  --humanego outputs/ego_nero_easy/robot_eef_scene_camera_axis_corrected/robot_eef_trajectory.json \
   --realbot examples/ego_nero_easy_real_bot.jsonl \
   --real-pose-key tcp_pose \
   --out outputs/ego_nero_easy/compare_realbot_humanego
@@ -115,7 +117,7 @@ outputs/ego_nero_easy/compare_realbot_humanego/orientation_errors.png
 
 ```bash
 $PY patches/build_nero_mujoco_scene.py \
-  --humanego-eef outputs/ego_nero_easy/robot_eef_scene_camera/robot_eef_trajectory.json \
+  --humanego-eef outputs/ego_nero_easy/robot_eef_scene_camera_axis_corrected/robot_eef_trajectory.json \
   --realbot examples/ego_nero_easy_real_bot.jsonl \
   --out outputs/mujoco_nero_scene
 ```
@@ -135,8 +137,8 @@ outputs/mujoco_nero_scene/meshes/*.stl
 ```bash
 $PY patches/replay_humanego_eef_mujoco.py \
   --scene outputs/mujoco_nero_scene/scene.xml \
-  --eef outputs/ego_nero_easy/robot_eef_scene_camera/robot_eef_trajectory.json \
-  --out outputs/mujoco_nero_scene/replays/ego_nero_easy_humanego_eef_scene_camera.mp4
+  --eef outputs/ego_nero_easy/robot_eef_scene_camera_axis_corrected/robot_eef_trajectory.json \
+  --out outputs/mujoco_nero_scene/replays/ego_nero_easy_humanego_eef_scene_camera_axis_corrected.mp4
 ```
 
 打开交互式 MuJoCo viewer：
@@ -144,7 +146,7 @@ $PY patches/replay_humanego_eef_mujoco.py \
 ```bash
 $PY patches/replay_humanego_eef_mujoco.py \
   --scene outputs/mujoco_nero_scene/scene.xml \
-  --eef outputs/ego_nero_easy/robot_eef_scene_camera/robot_eef_trajectory.json \
+  --eef outputs/ego_nero_easy/robot_eef_scene_camera_axis_corrected/robot_eef_trajectory.json \
   --viewer
 ```
 
@@ -165,5 +167,53 @@ $PY patches/replay_nero_realbot_joints_mujoco.py \
 $PY patches/replay_nero_realbot_joints_mujoco.py \
   --scene outputs/mujoco_nero_scene/scene.xml \
   --realbot examples/ego_nero_easy_real_bot.jsonl \
+  --viewer
+```
+
+## 8. 解 NERO EEF IK
+
+精简 IK 脚本读取 HumanEgo/WiLoR 导出的 EEF 轨迹，求解 `joint1..joint7`，
+默认让 MuJoCo 场景里的 `site:jaw_parallel_flange` 跟踪目标位姿。
+
+```bash
+$PY patches/solve_nero_eef_ik.py \
+  --scene outputs/mujoco_nero_scene/scene.xml \
+  --eef outputs/ego_nero_easy/robot_eef_scene_camera_axis_corrected/robot_eef_trajectory.json \
+  --out outputs/ego_nero_easy/nero_eef_ik/nero_eef_ik.npz
+```
+
+主要输出：
+
+```text
+outputs/ego_nero_easy/nero_eef_ik/nero_eef_ik.npz
+outputs/ego_nero_easy/nero_eef_ik/nero_eef_ik.json
+```
+
+调试少量帧：
+
+```bash
+$PY patches/solve_nero_eef_ik.py \
+  --end 10 \
+  --out /tmp/nero_eef_ik_debug.npz \
+  --progress-every 1
+```
+
+## 9. 回放 NERO EEF IK
+
+生成 MP4：
+
+```bash
+$PY patches/replay_nero_eef_ik_mujoco.py \
+  --scene outputs/mujoco_nero_scene/scene.xml \
+  --ik outputs/ego_nero_easy/nero_eef_ik/nero_eef_ik.npz \
+  --out outputs/mujoco_nero_scene/replays/ego_nero_easy_nero_eef_ik.mp4
+```
+
+打开交互式 MuJoCo viewer：
+
+```bash
+$PY patches/replay_nero_eef_ik_mujoco.py \
+  --scene outputs/mujoco_nero_scene/scene.xml \
+  --ik outputs/ego_nero_easy/nero_eef_ik/nero_eef_ik.npz \
   --viewer
 ```

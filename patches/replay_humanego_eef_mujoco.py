@@ -205,8 +205,8 @@ def render_replay(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--scene", default="outputs/mujoco_nero_scene/scene.xml")
-    parser.add_argument("--eef", default="outputs/ego_nero_easy/robot_eef_scene_camera/robot_eef_trajectory.json")
-    parser.add_argument("--out", default="outputs/mujoco_nero_scene/replays/ego_nero_easy_humanego_eef_scene_camera.mp4")
+    parser.add_argument("--eef", default="outputs/ego_nero_easy/robot_eef_scene_camera_axis_corrected/robot_eef_trajectory.json")
+    parser.add_argument("--out", default="outputs/mujoco_nero_scene/replays/ego_nero_easy_humanego_eef_scene_camera_axis_corrected.mp4")
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
