@@ -684,7 +684,7 @@ def main() -> None:
     parser.add_argument("--camera-height", type=float, default=0.585)
     parser.add_argument(
         "--humanego-eef",
-        default="outputs/ego_nero_easy/robot_eef_scene_camera/robot_eef_trajectory.json",
+        default="outputs/ego_nero_easy/robot_eef_scene_camera_axis_corrected/robot_eef_trajectory.json",
     )
     parser.add_argument("--realbot", default="examples/ego_nero_easy_real_bot.jsonl")
     parser.add_argument("--real-path-every", type=int, default=4)
