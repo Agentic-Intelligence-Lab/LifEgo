@@ -150,7 +150,7 @@ $PY patches/replay_humanego_eef_mujoco.py \
   --viewer
 ```
 
-## 7. 回放真实机器人关节
+## 7. 回放真实机器人关节/tcp
 
 生成 MP4：
 
@@ -170,15 +170,23 @@ $PY patches/replay_nero_realbot_joints_mujoco.py \
   --viewer
 ```
 
+$PY patches/replay_nero_realbot_tcp_mujoco.py \
+  --scene outputs/mujoco_nero_scene/scene.xml \
+  --realbot examples/ego_nero_easy_real_bot.jsonl \
+  --viewer
+
+
 ## 8. 解 NERO EEF IK
 
-精简 IK 脚本读取 HumanEgo/WiLoR 导出的 EEF 轨迹，求解 `joint1..joint7`，
-默认让 MuJoCo 场景里的 `site:jaw_parallel_flange` 跟踪目标位姿。
+精简 IK 脚本读取 **HumanEgo/WiLoR EEF** 轨迹，求解 `joint1..joint7`，
+默认让 MuJoCo `site:tcp` 跟踪该 EEF（目标来自 HumanEgo，不是真机 JSONL）。
+其它帧可改 `--target-name`（如 `recorded_flange` / `jaw_parallel_flange`）。
 
 ```bash
 $PY patches/solve_nero_eef_ik.py \
   --scene outputs/mujoco_nero_scene/scene.xml \
   --eef outputs/ego_nero_easy/robot_eef_scene_camera_axis_corrected/robot_eef_trajectory.json \
+  --target-name tcp \
   --out outputs/ego_nero_easy/nero_eef_ik/nero_eef_ik.npz
 ```
 
@@ -216,4 +224,92 @@ $PY patches/replay_nero_eef_ik_mujoco.py \
   --scene outputs/mujoco_nero_scene/scene.xml \
   --ik outputs/ego_nero_easy/nero_eef_ik/nero_eef_ik.npz \
   --viewer
+```
+## 10. 回放真机 TCP 轨迹
+
+用 mocap marker 回放 JSONL 中的 `tcp_pose`（也可用 `--pose-key flange_pose` / `fk_pose`）。
+
+原始数据（未校正姿态）：
+
+```bash
+$PY patches/replay_nero_realbot_tcp_mujoco.py \
+  --scene outputs/mujoco_nero_scene/scene.xml \
+  --realbot examples/ego_nero_easy_real_bot.jsonl \
+  --pose-key tcp_pose \
+  --out outputs/mujoco_nero_scene/replays/ego_nero_easy_realbot_tcp.mp4
+```
+
+## 11. Nero TCP / 法兰 / 夹爪坐标系
+
+**仿真 `site:tcp`（当前）= tool-centric**，在法兰→尖端线上：
+
+```text
+R_tcp = R_flange
+p_tcp = p_flange + R_flange @ [0.13, 0, 0]   # link7 +X，朝夹爪
+```
+
+**JSONL `tcp_pose`（真机控制器日志，未改正）** 仍是：
+
+```text
+p_tcp_log = p_flange + R_flange @ [0, 0, 0.13]   # link7 +Z
+```
+
+| 帧 | 说明 |
+|--|--|
+| 绿 `recorded_flange` | link7 / `flange_pose` |
+| 品红 `site:tcp` | 仿真 tool TCP（上式 +X） |
+| 橙 `gripper_tip` | 夹爪尖端估计 |
+| JSONL `tcp_pose` | 控制器旧定义（+Z），与 `site:tcp` 不同 |
+
+IK / 视觉对齐请用仿真 `site:tcp`（joint FK）。不要直接把未转换的 JSONL `tcp_pose` 当 tip 线上的 TCP。
+
+零位检查：
+
+```bash
+$PY patches/view_nero_zero_pose_frames.py --scene outputs/mujoco_nero_scene/scene.xml
+```
+
+三色跟随关节：
+
+```bash
+$PY patches/replay_nero_frames_legend_mujoco.py \
+  --scene outputs/mujoco_nero_scene/scene.xml \
+  --realbot examples/ego_nero_easy_real_bot.jsonl
+```
+
+### 三色对照：法兰 / TCP / 夹爪尖端
+
+```bash
+$PY patches/replay_nero_frames_legend_mujoco.py \
+  --scene outputs/mujoco_nero_scene/scene.xml \
+  --realbot examples/ego_nero_easy_real_bot.jsonl \
+  --out outputs/mujoco_nero_scene/replays/ego_nero_easy_frames_legend.mp4
+```
+
+| 颜色 | 含义 |
+|--|--|
+| 绿 | 法兰 `recorded_flange` / `flange_pose` |
+| 品红 | 控制器 TCP `site:tcp` / `tcp_pose` |
+| 橙 | 夹爪尖端 `gripper_tip`（指中大致位置） |
+
+默认三个 marker 都由 **关节 FK** 贴在臂上；加 `--markers-from-logged` 则绿/品红改用 JSONL 位姿。
+
+### 零位静态检查（推荐先看）
+
+机械臂保持 `joint1..7=0`，用同样的 MuJoCo passive viewer 标出三色坐标系：
+
+```bash
+$PY patches/view_nero_zero_pose_frames.py \
+  --scene outputs/mujoco_nero_scene/scene.xml
+```
+
+绿=法兰，品红=TCP，橙=尖端。关闭窗口退出。
+
+IK：`site:tcp` 跟踪 HumanEgo EEF（不要把真机 JSONL 当目标）：
+
+```bash
+$PY patches/solve_nero_eef_ik.py \
+  --eef outputs/ego_nero_easy/robot_eef_scene_camera_axis_corrected/robot_eef_trajectory.json \
+  --target-name tcp \
+  --out outputs/ego_nero_easy/nero_eef_ik/nero_eef_ik.npz
 ```

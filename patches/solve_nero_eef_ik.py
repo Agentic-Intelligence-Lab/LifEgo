@@ -378,10 +378,11 @@ def solve_trajectory(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scene", default="outputs/mujoco_nero_scene/scene.xml")
-    parser.add_argument("--eef", default="outputs/ego_nero_easy/robot_eef_scene_camera/robot_eef_trajectory.json")
+    parser.add_argument("--eef", default="outputs/ego_nero_easy/robot_eef_scene_camera_axis_corrected/robot_eef_trajectory.json")
     parser.add_argument("--out", default="outputs/ego_nero_easy/nero_eef_ik/nero_eef_ik.npz")
     parser.add_argument("--target-type", choices=["site", "body"], default="site")
-    parser.add_argument("--target-name", default="jaw_parallel_flange")
+    # Default: drive site:tcp to track HumanEgo/WiLoR EEF targets (not realbot poses).
+    parser.add_argument("--target-name", default="tcp")
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--end", type=int, default=-1)
     parser.add_argument("--pos-weight", type=float, default=100.0)

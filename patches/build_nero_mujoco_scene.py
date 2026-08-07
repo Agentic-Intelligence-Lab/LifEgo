@@ -217,8 +217,20 @@ def add_body_recursive(parent_body: ET.Element, link: str, links: dict, children
             {
                 "name": "recorded_flange",
                 "pos": "0 0 0",
-                "size": "0.016",
-                "rgba": "0.1 1 0.25 1",
+                "size": "0.020",
+                "rgba": "0.15 0.95 0.25 1",
+            },
+        )
+        # Tool-centric TCP: along flange→tip (link7 +X), between flange and gripper tip.
+        # deliberate change from controller log tcp_offset [0,0,0.13] along flange +Z.
+        ET.SubElement(
+            parent_body,
+            "site",
+            {
+                "name": "tcp",
+                "pos": "0.13 0 0",
+                "size": "0.020",
+                "rgba": "0.95 0.15 0.85 1",
             },
         )
     if link == "gripper_flange":
@@ -230,6 +242,18 @@ def add_body_recursive(parent_body: ET.Element, link: str, links: dict, children
                 "pos": "0 0 0",
                 "size": "0.018",
                 "rgba": "1 0.85 0.1 1",
+            },
+        )
+    if link == "gripper_base":
+        # Approximate tip mid along gripper +Z (finger start ~0.138 m).
+        ET.SubElement(
+            parent_body,
+            "site",
+            {
+                "name": "gripper_tip",
+                "pos": "0 0 0.175",
+                "size": "0.014",
+                "rgba": "1 0.55 0.05 1",
             },
         )
 
@@ -448,6 +472,56 @@ def add_pose_frames(
         add_pose_frame_body(worldbody, f"{name}_{i:03d}", pos, quat, origin_rgba, length, radius)
 
 
+def add_frame_legend_markers(worldbody: ET.Element) -> None:
+    """Mocap bodies for flange / controller TCP / gripper tip (color legend in replay)."""
+    specs = [
+        ("vis_flange_marker", "0.15 0.95 0.25 1"),
+        ("vis_tcp_marker", "0.95 0.15 0.85 1"),
+        ("vis_tip_marker", "1 0.55 0.05 1"),
+    ]
+    for i, (name, rgba) in enumerate(specs):
+        marker = ET.SubElement(
+            worldbody,
+            "body",
+            {
+                "name": name,
+                "mocap": "true",
+                "pos": f"0 {0.05 * (i - 1):.2f} 0.20",
+                "quat": "1 0 0 0",
+            },
+        )
+        ET.SubElement(
+            marker,
+            "geom",
+            {
+                "name": f"{name}_origin",
+                "type": "sphere",
+                "size": "0.016",
+                "rgba": rgba,
+                "contype": "0",
+                "conaffinity": "0",
+            },
+        )
+        for axis, fromto, axis_rgba in (
+            ("x", "0 0 0 0.07 0 0", "1 0.15 0.15 1"),
+            ("y", "0 0 0 0 0.07 0", "0.15 0.9 0.15 1"),
+            ("z", "0 0 0 0 0 0.07", "0.15 0.35 1 1"),
+        ):
+            ET.SubElement(
+                marker,
+                "geom",
+                {
+                    "name": f"{name}_{axis}",
+                    "type": "capsule",
+                    "fromto": fromto,
+                    "size": "0.0045",
+                    "rgba": axis_rgba,
+                    "contype": "0",
+                    "conaffinity": "0",
+                },
+            )
+
+
 def add_humanego_eef_marker(worldbody: ET.Element, humanego_eef_path: Path) -> None:
     pose = load_first_humanego_pose(humanego_eef_path)
     pos, quat = pose if pose is not None else ([0.0, 0.0, 0.2], [1.0, 0.0, 0.0, 0.0])
@@ -465,6 +539,7 @@ def add_humanego_eef_marker(worldbody: ET.Element, humanego_eef_path: Path) -> N
     ET.SubElement(marker, "geom", {"name": "humanego_eef_x_axis", "type": "capsule", "fromto": "0 0 0 0.075 0 0", "size": "0.005", "rgba": "1 0.05 0.05 1", "contype": "0", "conaffinity": "0"})
     ET.SubElement(marker, "geom", {"name": "humanego_eef_y_axis", "type": "capsule", "fromto": "0 0 0 0 0.075 0", "size": "0.005", "rgba": "0.05 0.8 0.1 1", "contype": "0", "conaffinity": "0"})
     ET.SubElement(marker, "geom", {"name": "humanego_eef_z_axis", "type": "capsule", "fromto": "0 0 0 0 0 0.075", "size": "0.005", "rgba": "0.1 0.3 1 1", "contype": "0", "conaffinity": "0"})
+    add_frame_legend_markers(worldbody)
 
 
 def build_scene(
@@ -580,8 +655,11 @@ Optional trajectory markers:
 
 Important frames:
 - `recorded_flange`: `link7` origin. This matches JSONL `poses.flange_pose`.
+- `tcp`: tool-centric TCP = `flange + 0.13 m` along flange/link7 +X (toward gripper tip).
+  This differs from JSONL `poses.tcp_pose` which used `[0,0,0.13]` along flange +Z.
+- `gripper_tip`: approximate tip mid on `gripper_base` at `+0.175 Z` in gripper frame.
 - `jaw_parallel_flange`: the extra URDF `gripper_flange` fixed adapter after `link7`; it is offset
-  from `recorded_flange` and has a different orientation.
+  from `recorded_flange` and has a different orientation (jaw +Z ≈ flange +X / base left).
 - `humanego_eef_marker`: a mocap body used by `patches/replay_humanego_eef_mujoco.py`
   to show the moving HumanEgo/WiLoR EEF frame.
 - Full jaw-parallel gripper geometry is attached after `jaw_parallel_flange`.
