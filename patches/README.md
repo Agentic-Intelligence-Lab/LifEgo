@@ -184,7 +184,7 @@ $PY patches/replay_nero_eef_ik_mujoco.py \
 
 | 脚本 | 用途 |
 |--|--|
-| `compare_realbot_humanego_eef.py` | 真机 vs HumanEgo 轨迹对比 |
+| `compare_realbot_humanego_eef.py` | 左右双平台：左真机关节、右 IK 解，默认可循环比对 |
 | `replay_humanego_eef_mujoco.py` | 只动 mocap 看 EEF |
 | `replay_nero_realbot_data_mujoco.py` | 真机关节回放 + 当前 TCP/尖端 |
 | `view_nero_zero_pose_frames.py` | 零位三色 viewer（法兰/TCP/尖端） |
@@ -198,4 +198,13 @@ $PY patches/replay_nero_realbot_data_mujoco.py \
   --scene outputs/mujoco_nero_scene/scene.xml \
   --realbot examples/ego_nero_easy_real_bot.jsonl \
   --out outputs/mujoco_nero_scene/replays/ego_nero_easy_realbot_data.mp4
+```
+
+左右并排：左真机 / 右 IK 解（默认循环）：
+
+```bash
+$PY patches/compare_realbot_humanego_eef.py --viewer \
+  --scene outputs/mujoco_nero_scene/scene.xml \
+  --realbot examples/ego_nero_easy_real_bot.jsonl \
+  --ik outputs/ego_nero_easy/nero_eef_ik/nero_eef_ik.npz
 ```

@@ -2,15 +2,11 @@
 """Replay Nero real-bot follower joints with current tool TCP + tip frames.
 
 - Robot motion: follower joint angles (+ gripper width) from JSONL.
-- Each frame marks current poses only (no tip/TCP path trails):
+- Each frame marks current poses only (no path trails):
     MAGENTA = site:tcp  (tool-centric FK after joints)
     ORANGE  = site:gripper_tip
   RGB sticks = local +X/+Y/+Z.
-
-Replaces the previous three scripts:
-  replay_nero_realbot_joints_mujoco.py
-  replay_nero_realbot_tcp_mujoco.py
-  replay_nero_frames_legend_mujoco.py
+- HumanEgo / WiLoR baked trajectories in the scene are hidden.
 """
 
 from __future__ import annotations
@@ -34,7 +30,11 @@ GRIPPER_JOINTS = ("gripper_joint1", "gripper_joint2")
 MARKER_TCP = "vis_tcp_marker"
 MARKER_TIP = "vis_tip_marker"
 MARKER_FLANGE = "vis_flange_marker"
-MARKER_HUMANEGO = "humanego_eef_marker"
+
+# Static HumanEgo / WiLoR trail baked into scene.xml — hide for real-bot-only replay.
+HIDE_NAME_PREFIXES = (
+    "humanego_eef_",
+)
 
 
 def load_runtime(viewer: bool, gl_backend: str) -> None:
@@ -174,6 +174,24 @@ def park_mocap(data: mujoco.MjData, mid: int | None) -> None:
     data.mocap_pos[mid] = [10.0, 10.0, 10.0]
 
 
+def _name_of(model: mujoco.MjModel, objtype: int, index: int) -> str:
+    name = mujoco.mj_id2name(model, objtype, index)
+    return name or ""
+
+
+def hide_human_trajectory(model: mujoco.MjModel, data: mujoco.MjData) -> None:
+    """Hide HumanEgo trail geoms/sites/mocap baked into the scene (real-bot only)."""
+    for i in range(model.ngeom):
+        name = _name_of(model, mujoco.mjtObj.mjOBJ_GEOM, i)
+        if any(name.startswith(p) for p in HIDE_NAME_PREFIXES):
+            model.geom_rgba[i, 3] = 0.0
+    for i in range(model.nsite):
+        name = _name_of(model, mujoco.mjtObj.mjOBJ_SITE, i)
+        if any(name.startswith(p) for p in HIDE_NAME_PREFIXES):
+            model.site_rgba[i, 3] = 0.0
+    park_mocap(data, mocap_id(model, "humanego_eef_marker"))
+
+
 def resolve_ids(model: mujoco.MjModel) -> dict:
     ids = {
         "tcp_site": site_id(model, "tcp"),
@@ -181,7 +199,6 @@ def resolve_ids(model: mujoco.MjModel) -> dict:
         "mocap_tcp": mocap_id(model, MARKER_TCP),
         "mocap_tip": mocap_id(model, MARKER_TIP),
         "mocap_flange": mocap_id(model, MARKER_FLANGE),
-        "mocap_humanego": mocap_id(model, MARKER_HUMANEGO),
     }
     if ids["mocap_tcp"] is None or ids["mocap_tip"] is None:
         raise RuntimeError(
@@ -194,7 +211,6 @@ def resolve_ids(model: mujoco.MjModel) -> dict:
 def update_tool_markers(data: mujoco.MjData, ids: dict) -> tuple[np.ndarray, np.ndarray]:
     """Place TCP/tip markers at current FK only (no trajectory history)."""
     park_mocap(data, ids["mocap_flange"])
-    park_mocap(data, ids["mocap_humanego"])
 
     tcp_p = data.site_xpos[ids["tcp_site"]].copy()
     tcp_R = data.site_xmat[ids["tcp_site"]].reshape(3, 3).copy()
@@ -257,6 +273,7 @@ def launch_viewer(args: argparse.Namespace) -> None:
     series = prepare_series(as_abs(args.realbot), args.fps)
     model = mujoco.MjModel.from_xml_path(str(as_abs(args.scene)))
     data = mujoco.MjData(model)
+    hide_human_trajectory(model, data)
     joint_qpos_addr, actuator_id = joint_maps(model)
     ids = resolve_ids(model)
     period = 1.0 / max(args.fps, 1e-9)
@@ -300,6 +317,7 @@ def render_replay(args: argparse.Namespace) -> None:
     series = prepare_series(as_abs(args.realbot), args.fps)
     model = mujoco.MjModel.from_xml_path(str(as_abs(args.scene)))
     data = mujoco.MjData(model)
+    hide_human_trajectory(model, data)
     joint_qpos_addr, actuator_id = joint_maps(model)
     ids = resolve_ids(model)
     renderer = mujoco.Renderer(model, height=args.height, width=args.width)
