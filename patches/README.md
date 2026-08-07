@@ -288,6 +288,8 @@ outputs/nero_pick_place_human/mujoco_nero_scene/replays/nero_pick_place_realbot_
 
 | 脚本 | 用途 |
 |--|--|
+| `estimate_scale_apriltag.py` | AprilTag 检测 + PnP / VGGT 深度尺度 `s` / 可选 `T_cam_in_base` 与 EEF 修正 |
+| `run_vggt_omega_infer.py` | VGGT-Ω 本地推理 smoke test（深度/相机姿态；后续做物体尺寸尺度校正） |
 | `replay_nero_realbot_data_mujoco.py` | 仅真机关节回放；隐藏场景内 HumanEgo 烘焙轨迹；品红 TCP / 橙 tip |
 | `replay_humanego_eef_mujoco.py` | 只动 mocap 看 EEF |
 | `view_nero_zero_pose_frames.py` | 零位三色 viewer（法兰 / TCP / 尖端） |
@@ -301,4 +303,32 @@ $PY patches/replay_nero_realbot_data_mujoco.py \
   --scene outputs/mujoco_nero_scene/scene.xml \
   --realbot examples/ego_nero_easy_real_bot.jsonl \
   --out outputs/mujoco_nero_scene/replays/ego_nero_easy_realbot_data.mp4
+```
+
+VGGT-Ω 推理 smoke test（需 CUDA，权重在 `thirdparty/vggt-omega/weights/VGGT-Omega/`）：
+
+```bash
+$PY patches/run_vggt_omega_infer.py \
+  --images outputs/nero_pick_place_human/preprocess/all_data \
+  --max-frames 8 --frame-stride 20 \
+  --out outputs/vggt_omega/smoke_nero_pick_place
+```
+
+AprilTag 尺度 / 外参（需真实 tag 边长 `--tag-size-m`）：
+
+```bash
+$PY patches/estimate_scale_apriltag.py \
+  --session outputs/nero_pick_place_human \
+  --tag-size-m 0.08 \
+  --tag-id 1 \
+  --vggt-npz outputs/nero_pick_place_human/vggt_omega/predictions.npz \
+  --out outputs/nero_pick_place_human/apriltag_calib
+```
+
+若已知 tag 在 robot base 下的位姿，加 `--tag-in-base-json` 或 `--tag-origin-base`，并可配合：
+
+```bash
+  --eef-in  .../robot_eef_scene_camera_axis_corrected/robot_eef_trajectory.json \
+  --eef-out .../robot_eef_apriltag_corrected \
+  --apply-scale
 ```
