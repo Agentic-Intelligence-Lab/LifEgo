@@ -49,6 +49,17 @@ def load_ik(path: Path) -> dict:
     missing = [k for k in required if k not in out]
     if missing:
         raise RuntimeError(f"IK file {path} missing keys: {missing}")
+    n = len(out["joint_qpos"])
+    if "grasp" in out and (
+        "gripper_width_m" not in out
+        or float(np.max(out["gripper_width_m"]) - np.min(out["gripper_width_m"])) < 1e-9
+    ):
+        open_m = float(out["gripper_open_m"]) if "gripper_open_m" in out else 0.1
+        closed_m = float(out["gripper_closed_m"]) if "gripper_closed_m" in out else 0.0
+        g = np.asarray(out["grasp"], dtype=np.float64).reshape(-1)
+        out["gripper_width_m"] = np.where(g > 0.5, closed_m, open_m).astype(np.float64)
+    elif "gripper_width_m" not in out:
+        out["gripper_width_m"] = np.full(n, 0.1, dtype=np.float64)
     return out
 
 
@@ -132,11 +143,14 @@ def draw_hud(
     q: np.ndarray,
     pos_err_m: float,
     ang_err_deg: float,
+    gripper_width_m: float,
+    grasp: int | None,
 ) -> np.ndarray:
     frame = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+    gtxt = f"grasp={'CLOSED' if grasp else 'OPEN'}" if grasp is not None else "grasp=n/a"
     lines = [
         f"Nero IK replay  frame {frame_idx + 1}/{total}  t={t:.2f}s",
-        "Robot follows IK joint_qpos; cyan marker shows target EEF",
+        f"cyan=EEF target  gripper {gripper_width_m * 1000:.0f} mm  {gtxt}",
         f"IK error: pos={pos_err_m * 1000.0:.1f} mm  ang={ang_err_deg:.2f} deg",
         "q(rad): " + " ".join(f"{v:+.2f}" for v in q),
     ]
@@ -148,9 +162,22 @@ def draw_hud(
     return frame
 
 
-def viewer_text(frame_idx: int, total: int, t: float, pos_err_m: float, ang_err_deg: float) -> tuple[None, None, str, str]:
+def viewer_text(
+    frame_idx: int,
+    total: int,
+    t: float,
+    pos_err_m: float,
+    ang_err_deg: float,
+    gripper_width_m: float,
+    grasp: int | None,
+) -> tuple[None, None, str, str]:
+    gtxt = f"grasp={'CLOSED' if grasp else 'OPEN'}" if grasp is not None else "grasp=n/a"
     left = f"Nero IK replay\nframe {frame_idx + 1}/{total}  t={t:.2f}s"
-    right = f"pos err {pos_err_m * 1000.0:.1f} mm\nang err {ang_err_deg:.2f} deg"
+    right = (
+        f"pos err {pos_err_m * 1000.0:.1f} mm\n"
+        f"ang err {ang_err_deg:.2f} deg\n"
+        f"gripper {gripper_width_m * 1000:.0f} mm  {gtxt}"
+    )
     return (None, None, left, right)
 
 
@@ -181,6 +208,7 @@ def render_replay(args: argparse.Namespace) -> None:
         if "gripper_width_m" in ik
         else np.full(len(q), args.gripper_width_m, dtype=np.float64)
     )
+    grasp = np.asarray(ik["grasp"], dtype=np.int32) if "grasp" in ik else None
 
     model = mujoco.MjModel.from_xml_path(str(scene_path))
     data = mujoco.MjData(model)
@@ -203,7 +231,10 @@ def render_replay(args: argparse.Namespace) -> None:
             mujoco.mj_forward(model, data)
             renderer.update_scene(data, camera=cam)
             rgb = renderer.render()
-            writer.write(draw_hud(rgb, i, len(q), times[i], q[i], pos_err[i], ang_err[i]))
+            g_i = int(grasp[i]) if grasp is not None else None
+            writer.write(
+                draw_hud(rgb, i, len(q), times[i], q[i], pos_err[i], ang_err[i], gripper_width[i], g_i)
+            )
     finally:
         writer.release()
         renderer.close()
@@ -239,6 +270,7 @@ def launch_viewer(args: argparse.Namespace) -> None:
         if "gripper_width_m" in ik
         else np.full(len(q), args.gripper_width_m, dtype=np.float64)
     )
+    grasp = np.asarray(ik["grasp"], dtype=np.int32) if "grasp" in ik else None
 
     model = mujoco.MjModel.from_xml_path(str(scene_path))
     data = mujoco.MjData(model)
@@ -254,10 +286,23 @@ def launch_viewer(args: argparse.Namespace) -> None:
         frame_idx = 0
         while viewer.is_running():
             with viewer.lock():
-                apply_frame(data, arm_addrs, gripper_addrs, act_ids, q[frame_idx], gripper_width[frame_idx], times[frame_idx])
+                apply_frame(
+                    data, arm_addrs, gripper_addrs, act_ids, q[frame_idx], gripper_width[frame_idx], times[frame_idx]
+                )
                 apply_marker(data, mocap_id, target_pos[frame_idx], target_quat[frame_idx])
                 mujoco.mj_forward(model, data)
-            viewer.set_texts(viewer_text(frame_idx, len(q), times[frame_idx], pos_err[frame_idx], ang_err[frame_idx]))
+            g_i = int(grasp[frame_idx]) if grasp is not None else None
+            viewer.set_texts(
+                viewer_text(
+                    frame_idx,
+                    len(q),
+                    times[frame_idx],
+                    pos_err[frame_idx],
+                    ang_err[frame_idx],
+                    gripper_width[frame_idx],
+                    g_i,
+                )
+            )
             viewer.sync()
             if frame_idx < len(q) - 1:
                 frame_idx += 1

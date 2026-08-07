@@ -35,12 +35,17 @@ def as_abs(path: str | Path) -> Path:
     return path if path.is_absolute() else REPO_ROOT / path
 
 
-def load_eef(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def load_eef(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Load valid HumanEgo EEF samples.
+
+    grasp is binary: 1 = closed/grasping, 0 = open (from WiLoR thumb–index ratio).
+    """
     data = json.loads(path.read_text(encoding="utf-8"))
     idxs = []
     times = []
     pos = []
     rot = []
+    grasps = []
     for i, rec in enumerate(data.get("records", [])):
         if not rec.get("valid"):
             continue
@@ -50,6 +55,10 @@ def load_eef(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray
         times.append(float(stamp) * 1e-9 if stamp is not None else i / 30.0)
         pos.append(T[:3, 3])
         rot.append(R.from_matrix(T[:3, :3]).as_quat())
+        g = rec.get("grasp")
+        if g is None:
+            g = 0
+        grasps.append(1 if float(g) > 0.5 else 0)
     if not pos:
         raise RuntimeError(f"No valid EEF records found in {path}")
     t = np.asarray(times, dtype=np.float64)
@@ -59,7 +68,18 @@ def load_eef(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray
         t,
         np.asarray(pos, dtype=np.float64),
         np.asarray(rot, dtype=np.float64),
+        np.asarray(grasps, dtype=np.int32),
     )
+
+
+def grasp_to_width_m(grasp: np.ndarray | float, open_m: float, closed_m: float) -> np.ndarray | float:
+    """Map binary grasp (1=closed, 0=open) to finger opening in meters."""
+    open_m = float(np.clip(open_m, 0.0, 0.1))
+    closed_m = float(np.clip(closed_m, 0.0, 0.1))
+    if np.isscalar(grasp) or (isinstance(grasp, np.ndarray) and grasp.ndim == 0):
+        return closed_m if float(grasp) > 0.5 else open_m
+    g = np.asarray(grasp, dtype=np.float64)
+    return np.where(g > 0.5, closed_m, open_m).astype(np.float64)
 
 
 def joint_qpos_addrs(model: mujoco.MjModel, names: tuple[str, ...]) -> np.ndarray:
@@ -235,7 +255,7 @@ def solve_trajectory(args: argparse.Namespace) -> None:
     out_path = as_abs(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    frame_idx, times, target_pos, target_quat = load_eef(eef_path)
+    frame_idx, times, target_pos, target_quat, grasp = load_eef(eef_path)
     if args.end >= 0:
         stop = min(args.end, len(frame_idx))
     else:
@@ -247,7 +267,9 @@ def solve_trajectory(args: argparse.Namespace) -> None:
     times = times[start:stop]
     target_pos = target_pos[start:stop]
     target_quat = target_quat[start:stop]
+    grasp = grasp[start:stop]
     target_rot = R.from_quat(target_quat).as_matrix()
+    gripper_width = grasp_to_width_m(grasp, args.gripper_open_m, args.gripper_closed_m)
 
     model = mujoco.MjModel.from_xml_path(str(scene_path))
     data = mujoco.MjData(model)
@@ -293,7 +315,7 @@ def solve_trajectory(args: argparse.Namespace) -> None:
                 frame_type=args.target_type,
                 frame_id=frame_id,
                 bounds=bounds,
-                gripper_width_m=args.gripper_width_m,
+                gripper_width_m=float(gripper_width[i]),
                 pos_weight=args.pos_weight,
                 ori_weight=args.ori_weight,
                 smooth_weight=args.smooth_weight,
@@ -331,7 +353,8 @@ def solve_trajectory(args: argparse.Namespace) -> None:
         joint_qpos=joint_q,
         full_qpos=full_qpos,
         ctrl=ctrl,
-        gripper_width_m=np.full(count, args.gripper_width_m, dtype=np.float64),
+        gripper_width_m=gripper_width,
+        grasp=grasp,
         target_type=np.asarray(args.target_type),
         target_name=np.asarray(args.target_name),
         target_pos_m=target_pos,
@@ -345,6 +368,8 @@ def solve_trajectory(args: argparse.Namespace) -> None:
         seed_label=np.asarray(seed_label),
         source_eef=np.asarray(str(eef_path)),
         scene=np.asarray(str(scene_path)),
+        gripper_open_m=np.asarray(float(args.gripper_open_m)),
+        gripper_closed_m=np.asarray(float(args.gripper_closed_m)),
     )
     meta = {
         "scene": str(scene_path),
@@ -356,7 +381,10 @@ def solve_trajectory(args: argparse.Namespace) -> None:
         "target_type": args.target_type,
         "target_name": args.target_name,
         "joint_names": list(ARM_JOINTS),
-        "gripper_width_m": float(args.gripper_width_m),
+        "gripper_open_m": float(args.gripper_open_m),
+        "gripper_closed_m": float(args.gripper_closed_m),
+        "grasp_closed_frames": int(np.count_nonzero(grasp)),
+        "grasp_open_frames": int(count - np.count_nonzero(grasp)),
         "pos_weight": float(args.pos_weight),
         "ori_weight": float(args.ori_weight),
         "smooth_weight": float(args.smooth_weight),
@@ -373,6 +401,10 @@ def solve_trajectory(args: argparse.Namespace) -> None:
     print(f"meta:  {out_path.with_suffix('.json')}")
     print(f"pos mean/max: {meta['pos_err_mean_mm']:.1f}/{meta['pos_err_max_mm']:.1f} mm")
     print(f"ang mean/max: {meta['ang_err_mean_deg']:.2f}/{meta['ang_err_max_deg']:.2f} deg")
+    print(
+        f"grasp open/closed frames: {meta['grasp_open_frames']}/{meta['grasp_closed_frames']}  "
+        f"width open/closed: {args.gripper_open_m:.3f}/{args.gripper_closed_m:.3f} m"
+    )
 
 
 def main() -> None:
@@ -393,10 +425,29 @@ def main() -> None:
     parser.add_argument("--random-seeds", type=int, default=2)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--initial-q", type=float, default=0.0)
-    parser.add_argument("--gripper-width-m", type=float, default=0.08)
+    parser.add_argument(
+        "--gripper-open-m",
+        type=float,
+        default=0.1,
+        help="Finger opening width when HumanEgo grasp=0 (open)",
+    )
+    parser.add_argument(
+        "--gripper-closed-m",
+        type=float,
+        default=0.0,
+        help="Finger opening width when HumanEgo grasp=1 (closed)",
+    )
+    parser.add_argument(
+        "--gripper-width-m",
+        type=float,
+        default=None,
+        help="Legacy: if set, use as constant open width (overrides --gripper-open-m)",
+    )
     parser.add_argument("--progress-every", type=int, default=10)
     parser.add_argument("--gl-backend", choices=["auto", "glfw", "egl", "osmesa"], default="auto")
     args = parser.parse_args()
+    if args.gripper_width_m is not None:
+        args.gripper_open_m = float(args.gripper_width_m)
     load_runtime(args.gl_backend)
     solve_trajectory(args)
 

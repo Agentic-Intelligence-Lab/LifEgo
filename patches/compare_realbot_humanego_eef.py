@@ -4,8 +4,13 @@
 Builds a dual-platform scene from the single Nero table scene: the original
 platform stays on the left; an identical robot platform is copied to the right
 (+Y / robot-right). Left replays JSONL follower joints; right replays a chosen
-EEF-IK npz. Playback loops by default so real vs HumanEgo-reconstructed
-motion can be compared continuously.
+EEF-IK npz.
+
+HumanEgo EEF is visualized on both platforms:
+- cyan path sites + sampled orientation frames (static trail from the scene)
+- cyan mocap triad following the current EEF / IK target pose
+
+Playback loops by default so real vs HumanEgo-reconstructed motion can be compared.
 """
 
 from __future__ import annotations
@@ -30,12 +35,16 @@ ARM_JOINTS = tuple(f"joint{i}" for i in range(1, 8))
 GRIPPER_JOINTS = ("gripper_joint1", "gripper_joint2")
 RIGHT_PREFIX = "r_"
 
-# Static path/frame clutter removed when building the dual scene.
+# Real-bot path clutter only — keep HumanEgo EEF path/frames for execution comparison.
 STRIP_NAME_PREFIXES = (
     "real_flange_path_",
     "real_flange_frame_",
     "real_flange_start",
     "real_flange_end",
+)
+
+# HumanEgo static trail on left; cloned to right with +Y offset.
+HUMANEGO_TRAIL_PREFIXES = (
     "humanego_eef_path_",
     "humanego_eef_frame_",
     "humanego_eef_start",
@@ -106,10 +115,62 @@ def load_ik(path: Path) -> dict:
     if "time_s" not in out:
         n = len(out["joint_qpos"])
         out["time_s"] = np.arange(n, dtype=np.float64)
-    if "gripper_width_m" not in out:
-        out["gripper_width_m"] = np.full(len(out["joint_qpos"]), 0.1, dtype=np.float64)
     t = np.asarray(out["time_s"], dtype=np.float64)
     out["time_s"] = t - t[0]
+    n = len(out["joint_qpos"])
+    if "grasp" in out:
+        out["grasp"] = np.asarray(out["grasp"], dtype=np.int32).reshape(-1)
+    if "gripper_width_m" not in out:
+        if "grasp" in out:
+            open_m = float(out["gripper_open_m"]) if "gripper_open_m" in out else 0.1
+            closed_m = float(out["gripper_closed_m"]) if "gripper_closed_m" in out else 0.0
+            out["gripper_width_m"] = np.where(out["grasp"] > 0.5, closed_m, open_m).astype(np.float64)
+        else:
+            out["gripper_width_m"] = np.full(n, 0.1, dtype=np.float64)
+    return out
+
+
+def load_eef_grasp(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    """Return (normalized progress 0..1, binary grasp) from EEF JSON."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    grasps = []
+    times = []
+    for i, rec in enumerate(data.get("records", [])):
+        if not rec.get("valid"):
+            continue
+        stamp = rec.get("ts")
+        times.append(float(stamp) * 1e-9 if stamp is not None else i / 30.0)
+        g = rec.get("grasp", 0)
+        grasps.append(1 if g is not None and float(g) > 0.5 else 0)
+    if not grasps:
+        raise RuntimeError(f"No valid grasp records in {path}")
+    t = np.asarray(times, dtype=np.float64)
+    t -= t[0]
+    if t[-1] <= 0:
+        u = np.zeros(len(t), dtype=np.float64)
+    else:
+        u = t / t[-1]
+    return u, np.asarray(grasps, dtype=np.int32)
+
+
+def grasp_to_width_m(grasp: np.ndarray, open_m: float = 0.1, closed_m: float = 0.0) -> np.ndarray:
+    g = np.asarray(grasp, dtype=np.float64)
+    return np.where(g > 0.5, closed_m, open_m).astype(np.float64)
+
+
+def resample_binary_to_timeline(
+    src_u: np.ndarray, values: np.ndarray, dst_t: np.ndarray
+) -> np.ndarray:
+    """Nearest-neighbor (in progress) for binary series mapped to dst timeline."""
+    if len(src_u) == 1:
+        return np.full(len(dst_t), int(values[0]), dtype=values.dtype)
+    if len(dst_t) == 1:
+        return np.asarray([values[0]], dtype=values.dtype)
+    dst_u = (dst_t - dst_t[0]) / max(float(dst_t[-1] - dst_t[0]), 1e-12)
+    out = np.zeros(len(dst_t), dtype=values.dtype)
+    for i, u in enumerate(dst_u):
+        j = int(np.argmin(np.abs(src_u - u)))
+        out[i] = values[j]
     return out
 
 
@@ -184,6 +245,27 @@ def offset_body_tree_positions(elem: ET.Element, dy: float) -> None:
         elem.attrib["pos"] = " ".join(f"{v:.9g}" for v in parts)
 
 
+def is_humanego_trail(name: str | None) -> bool:
+    if not name:
+        return False
+    return any(name.startswith(p) for p in HUMANEGO_TRAIL_PREFIXES)
+
+
+def clone_humanego_trails(worldbody: ET.Element, side_offset_y: float) -> int:
+    """Copy HumanEgo path sites / orientation frames onto the right platform."""
+    n = 0
+    for child in list(worldbody):
+        name = child.attrib.get("name")
+        if not is_humanego_trail(name):
+            continue
+        right = copy.deepcopy(child)
+        prefix_element_names(right, RIGHT_PREFIX)
+        offset_body_tree_positions(right, side_offset_y)
+        worldbody.append(right)
+        n += 1
+    return n
+
+
 def build_dual_scene(src_scene: Path, out_scene: Path, side_offset_y: float) -> Path:
     """Duplicate robot platform to the right (+Y) inside a dual MJCF file."""
     tree = ET.parse(src_scene)
@@ -194,6 +276,7 @@ def build_dual_scene(src_scene: Path, out_scene: Path, side_offset_y: float) -> 
         raise RuntimeError(f"No worldbody in {src_scene}")
 
     strip_path_decoration(worldbody)
+    n_he_trail = clone_humanego_trails(worldbody, side_offset_y)
 
     # Widen floor / stats for two tables.
     for geom in worldbody.findall("geom"):
@@ -237,6 +320,12 @@ def build_dual_scene(src_scene: Path, out_scene: Path, side_offset_y: float) -> 
         prefix_element_names(right_body, RIGHT_PREFIX)
         offset_body_tree_positions(right_body, side_offset_y)
         worldbody.append(right_body)
+
+    if n_he_trail == 0:
+        print(
+            "Warning: scene has no HumanEgo EEF path/frames. "
+            "Rebuild with build_nero_mujoco_scene.py --humanego-eef ..."
+        )
 
     actuator = root.find("actuator")
     if actuator is not None:
@@ -401,7 +490,14 @@ def make_camera(side_offset_y: float) -> mujoco.MjvCamera:
     return cam
 
 
-def prepare_series(realbot: Path, ik_path: Path, fps: float) -> dict:
+def prepare_series(
+    realbot: Path,
+    ik_path: Path,
+    fps: float,
+    eef_path: Path | None = None,
+    gripper_open_m: float = 0.1,
+    gripper_closed_m: float = 0.0,
+) -> dict:
     real = load_realbot(realbot)
     ik = load_ik(ik_path)
     t_real, q_real = resample_series(real["time_s"], real["joint_qpos"], fps)
@@ -409,15 +505,46 @@ def prepare_series(realbot: Path, ik_path: Path, fps: float) -> dict:
 
     # Align IK to the same frame clock via normalized progress (same length as real).
     q_ik = resample_to_timeline(ik["time_s"], np.asarray(ik["joint_qpos"], dtype=np.float64), t_real)
-    w_ik = resample_to_timeline(ik["time_s"], np.asarray(ik["gripper_width_m"], dtype=np.float64), t_real)
+
+    open_m = float(ik["gripper_open_m"]) if "gripper_open_m" in ik else gripper_open_m
+    closed_m = float(ik["gripper_closed_m"]) if "gripper_closed_m" in ik else gripper_closed_m
+
+    # Prefer explicit grasp channel; otherwise derive if widths are constant old IK
+    # and EEF is available, or use gripper_width_m timeline directly.
+    if "grasp" in ik:
+        g_u = (ik["time_s"] - ik["time_s"][0]) / max(float(ik["time_s"][-1] - ik["time_s"][0]), 1e-12)
+        grasp = resample_binary_to_timeline(g_u, np.asarray(ik["grasp"], dtype=np.int32), t_real)
+        w_ik = grasp_to_width_m(grasp, open_m, closed_m)
+    else:
+        w_src = np.asarray(ik["gripper_width_m"], dtype=np.float64)
+        is_const = float(np.max(w_src) - np.min(w_src)) < 1e-6
+        eef = eef_path
+        if eef is None and "source_eef" in ik:
+            try:
+                eef = Path(str(ik["source_eef"]))
+            except Exception:
+                eef = None
+        if is_const and eef is not None:
+            eef = Path(eef)
+            if not eef.is_absolute():
+                eef = REPO_ROOT / eef
+            if eef.is_file():
+                u, g = load_eef_grasp(eef)
+                grasp = resample_binary_to_timeline(u, g, t_real)
+                w_ik = grasp_to_width_m(grasp, open_m, closed_m)
+            else:
+                w_ik = resample_to_timeline(ik["time_s"], w_src, t_real)
+                grasp = (w_ik < 0.5 * (open_m + closed_m)).astype(np.int32)
+        else:
+            w_ik = resample_to_timeline(ik["time_s"], w_src, t_real)
+            grasp = (w_ik < 0.5 * (open_m + closed_m)).astype(np.int32)
+
     tgt_pos = resample_to_timeline(ik["time_s"], np.asarray(ik["target_pos_m"], dtype=np.float64), t_real)
-    # Quat: independent component interp is crude; use Slerp-like via R.
+    # Quat: independent component interp is crude; use nearest
     src_u = (ik["time_s"] - ik["time_s"][0]) / max(float(ik["time_s"][-1] - ik["time_s"][0]), 1e-12)
     dst_u = (t_real - t_real[0]) / max(float(t_real[-1] - t_real[0]), 1e-12) if len(t_real) > 1 else np.zeros(len(t_real))
-    # Nearest-neighbor quat (stable) then optional short slerp between neighbors
     quats = np.asarray(ik["target_quat_xyzw"], dtype=np.float64)
     idx = np.clip(np.searchsorted(src_u, dst_u), 0, len(src_u) - 1)
-    # refine to nearest
     for i, u in enumerate(dst_u):
         j = int(idx[i])
         if j > 0 and abs(src_u[j - 1] - u) < abs(src_u[j] - u):
@@ -430,10 +557,13 @@ def prepare_series(realbot: Path, ik_path: Path, fps: float) -> dict:
         "real_gripper_width_m": w_real,
         "ik_joint_qpos": q_ik,
         "ik_gripper_width_m": w_ik,
+        "ik_grasp": grasp,
         "ik_target_pos_m": tgt_pos,
         "ik_target_quat_xyzw": tgt_quat,
         "n_real_src": len(real["joint_qpos"]),
         "n_ik_src": len(ik["joint_qpos"]),
+        "gripper_open_m": open_m,
+        "gripper_closed_m": closed_m,
     }
 
 
@@ -463,15 +593,22 @@ def step_frame(
     apply_joints(data, right_maps[0], right_maps[1], series["ik_joint_qpos"][i], series["ik_gripper_width_m"][i])
     mujoco.mj_forward(model, data)
 
-    left_tcp, left_tip = update_tool_markers(data, left_ids)
-    # HumanEgo IK target on the right platform (+Y offset to that table frame).
-    tgt_pos = series["ik_target_pos_m"][i].copy()
-    tgt_pos[1] += side_offset_y
+    # Current HumanEgo EEF target on both platforms (cyan mocap + static path trail).
+    tgt_base = series["ik_target_pos_m"][i].copy()
+    tgt_quat = series["ik_target_quat_xyzw"][i]
+    left_tcp, left_tip = update_tool_markers(
+        data,
+        left_ids,
+        humanego_pos=tgt_base,
+        humanego_quat_xyzw=tgt_quat,
+    )
+    tgt_right = tgt_base.copy()
+    tgt_right[1] += side_offset_y
     right_tcp, right_tip = update_tool_markers(
         data,
         right_ids,
-        humanego_pos=tgt_pos,
-        humanego_quat_xyzw=series["ik_target_quat_xyzw"][i],
+        humanego_pos=tgt_right,
+        humanego_quat_xyzw=tgt_quat,
     )
     mujoco.mj_forward(model, data)
     return {
@@ -480,12 +617,20 @@ def step_frame(
         "left_tip": left_tip,
         "right_tcp": right_tcp,
         "right_tip": right_tip,
-        "tgt_pos": tgt_pos,
+        "tgt_pos": tgt_base,
+        "tgt_pos_right": tgt_right,
     }
 
 
 def launch_viewer(args: argparse.Namespace, dual_scene: Path) -> None:
-    series = prepare_series(as_abs(args.realbot), as_abs(args.ik), args.fps)
+    series = prepare_series(
+        as_abs(args.realbot),
+        as_abs(args.ik),
+        args.fps,
+        eef_path=as_abs(args.eef) if args.eef else None,
+        gripper_open_m=args.gripper_open_m,
+        gripper_closed_m=args.gripper_closed_m,
+    )
     model = mujoco.MjModel.from_xml_path(str(dual_scene))
     data = mujoco.MjData(model)
     left_maps = joint_maps(model, "")
@@ -495,7 +640,7 @@ def launch_viewer(args: argparse.Namespace, dual_scene: Path) -> None:
     period = 1.0 / max(args.fps, 1e-9)
     n = len(series["time_s"])
 
-    print("LEFT=real-bot joints  RIGHT=IK joints  CYAN=HumanEgo EEF target (right only)")
+    print("LEFT=real-bot  RIGHT=IK  CYAN=HumanEgo EEF path + current EEF (both sides)")
     print("MAGENTA=tcp  ORANGE=tip | loops by default  --once to stop after one pass")
     with mujoco.viewer.launch_passive(model, data) as viewer:
         apply_viewer_camera(viewer, args.side_offset_y)
@@ -513,11 +658,20 @@ def launch_viewer(args: argparse.Namespace, dual_scene: Path) -> None:
                     i,
                     args.side_offset_y,
                 )
-            err_mm = float(np.linalg.norm(info["right_tcp"] - info["tgt_pos"]) * 1000.0)
-            left = f"LEFT real-bot\n{i + 1}/{n}  t={info['t']:.2f}s\nloop={'on' if not args.once else 'off'}"
+            err_r = float(np.linalg.norm(info["right_tcp"] - info["tgt_pos_right"]) * 1000.0)
+            err_l = float(np.linalg.norm(info["left_tcp"] - info["tgt_pos"]) * 1000.0)
+            grasp = int(series["ik_grasp"][i])
+            left = (
+                f"LEFT real-bot\n"
+                f"{i + 1}/{n} t={info['t']:.2f}s\n"
+                f"CYAN=HE path/EEF\n"
+                f"|tcp-HE|={err_l:.1f} mm"
+            )
             right = (
-                f"RIGHT IK (HumanEgo)\n"
-                f"CYAN target  |tcp-tgt|={err_mm:.1f} mm\n"
+                f"RIGHT IK + HE grasp\n"
+                f"grasp={'CLOSED' if grasp else 'OPEN'}  "
+                f"w={series['ik_gripper_width_m'][i]*1000:.0f}mm\n"
+                f"|tcp-HE|={err_r:.1f} mm\n"
                 f"MAGENTA tcp  ORANGE tip"
             )
             viewer.set_texts((None, None, left, right))
@@ -533,12 +687,16 @@ def launch_viewer(args: argparse.Namespace, dual_scene: Path) -> None:
                 time.sleep(0.05)
 
 
-def draw_hud(frame_rgb: np.ndarray, i: int, n: int, info: dict, loop: bool) -> np.ndarray:
+def draw_hud(frame_rgb: np.ndarray, i: int, n: int, info: dict, loop: bool, series: dict) -> np.ndarray:
     frame = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-    err_mm = float(np.linalg.norm(info["right_tcp"] - info["tgt_pos"]) * 1000.0)
+    err_r = float(np.linalg.norm(info["right_tcp"] - info["tgt_pos_right"]) * 1000.0)
+    err_l = float(np.linalg.norm(info["left_tcp"] - info["tgt_pos"]) * 1000.0)
+    grasp = int(series["ik_grasp"][i])
+    w_mm = float(series["ik_gripper_width_m"][i] * 1000.0)
     lines = [
-        f"LEFT real-bot  |  RIGHT IK (HumanEgo)   {i + 1}/{n}  t={info['t']:.2f}s  loop={'on' if loop else 'off'}",
-        f"MAGENTA=tcp  ORANGE=tip  CYAN=HumanEgo target (right)  |tcp-tgt|={err_mm:.1f} mm",
+        f"LEFT real-bot | RIGHT IK   {i + 1}/{n} t={info['t']:.2f}s  loop={'on' if loop else 'off'}",
+        f"CYAN=HumanEgo EEF path+frame  MAGENTA=tcp  ORANGE=tip",
+        f"|tcp-HE| L={err_l:.1f} R={err_r:.1f} mm  RIGHT grasp={'CLOSED' if grasp else 'OPEN'} w={w_mm:.0f}mm",
     ]
     x, y = 18, 28
     for line in lines:
@@ -551,7 +709,14 @@ def draw_hud(frame_rgb: np.ndarray, i: int, n: int, info: dict, loop: bool) -> n
 def render_replay(args: argparse.Namespace, dual_scene: Path) -> None:
     out_path = as_abs(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    series = prepare_series(as_abs(args.realbot), as_abs(args.ik), args.fps)
+    series = prepare_series(
+        as_abs(args.realbot),
+        as_abs(args.ik),
+        args.fps,
+        eef_path=as_abs(args.eef) if args.eef else None,
+        gripper_open_m=args.gripper_open_m,
+        gripper_closed_m=args.gripper_closed_m,
+    )
     model = mujoco.MjModel.from_xml_path(str(dual_scene))
     data = mujoco.MjData(model)
     left_maps = joint_maps(model, "")
@@ -584,7 +749,7 @@ def render_replay(args: argparse.Namespace, dual_scene: Path) -> None:
                 )
                 renderer.update_scene(data, camera=cam)
                 rgb = renderer.render()
-                writer.write(draw_hud(rgb, i, n, info, loop=not args.once))
+                writer.write(draw_hud(rgb, i, n, info, loop=not args.once, series=series))
     finally:
         writer.release()
         renderer.close()
@@ -601,10 +766,12 @@ def render_replay(args: argparse.Namespace, dual_scene: Path) -> None:
         "fps": float(args.fps),
         "n_real_src": int(series["n_real_src"]),
         "n_ik_src": int(series["n_ik_src"]),
+        "grasp_closed_frames": int(np.count_nonzero(series["ik_grasp"])),
+        "grasp_open_frames": int(len(series["ik_grasp"]) - np.count_nonzero(series["ik_grasp"])),
         "legend": {
-            "left": "real-bot follower joints from JSONL",
-            "right": "IK joint_qpos from npz",
-            "cyan_right": "HumanEgo EEF IK target (world + right offset)",
+            "left": "real-bot follower joints + real gripper from JSONL",
+            "right": "IK joint_qpos + HumanEgo binary grasp (0=open, 1=closed)",
+            "cyan": "HumanEgo EEF path (sites) + current EEF frame (mocap) on both platforms",
             "magenta": "site:tcp FK",
             "orange": "site:gripper_tip FK",
         },
@@ -625,6 +792,13 @@ def main() -> None:
     parser.add_argument("--reuse-dual-scene", action="store_true")
     parser.add_argument("--realbot", default="examples/ego_nero_easy_real_bot.jsonl")
     parser.add_argument("--ik", default="outputs/ego_nero_easy/nero_eef_ik/nero_eef_ik.npz")
+    parser.add_argument(
+        "--eef",
+        default=None,
+        help="Optional HumanEgo EEF JSON for grasp remap if IK npz is old/constant gripper",
+    )
+    parser.add_argument("--gripper-open-m", type=float, default=0.1)
+    parser.add_argument("--gripper-closed-m", type=float, default=0.0)
     parser.add_argument(
         "--out",
         default="outputs/mujoco_nero_scene/replays/ego_nero_easy_realbot_vs_ik.mp4",
