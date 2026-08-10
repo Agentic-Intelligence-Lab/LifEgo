@@ -224,60 +224,101 @@ NERO_TABLE_V1 = SceneAssets(
     platform=RobotPlatform(
         name="nero_table",
         T_base_in_world=None,
-        table_point_m=None,  # e.g. np.array([0.0, 0.0, 0.0])
-        table_normal=None,  # e.g. np.array([0.0, 0.0, 1.0])
+        table_point_m=np.array([0.0, 0.0, 0.0]),
+        table_normal=np.array([0.0, 0.0, 1.0]),
         workspace_center_m=None,
         workspace_half_size_m=None,
         tcp=TcpOffset(
-            t_flange_m=None,  # e.g. tool-centric [0.13, 0.0, 0.0]
+            t_flange_m=np.array([0.13, 0.0, 0.0]),
             R_flange=None,
             notes="Tool-centric TCP is flange +X 0.13 m in current MuJoCo scene; "
-            "controller JSONL historically used flange +Z 0.13 m.",
+            "controller JSONL historically used flange +Z 0.13 m. "
+            "Verified against site:tcp with patches/view_nero_zero_pose_frames.py.",
         ),
-        gripper_open_m=None,
-        gripper_closed_m=None,
-        urdf_root=None,  # e.g. "/home/ymq/code/agx_arm_urdf/nero"
+        # Copied from existing pipeline defaults (solve_nero_eef_ik.py --gripper-open-m /
+        # --gripper-closed-m); not independently re-measured here.
+        gripper_open_m=0.1,
+        gripper_closed_m=0.0,
+        urdf_root=None,  # handled via AGX_ARM_URDF_ROOT env var in build_nero_mujoco_scene.py
         notes="",
     ),
     cameras={
         "scene_rgb": CameraAsset(
             name="scene_rgb",
             intrinsics=CameraIntrinsics(
-                width=None,
-                height=None,
-                fx=None,
-                fy=None,
-                cx=None,
-                cy=None,
-                dist_coeffs=None,
-                notes="",
+                width=640,
+                height=480,
+                fx=606.381,
+                fy=605.975,
+                cx=331.115,
+                cy=238.649,
+                dist_coeffs=np.array([0.0, 0.0, 0.0, 0.0, 0.0]),
+                notes="RealSense D435i, 640x480 stream, read via "
+                "nero-data-collect-win-tcp-end/pyAgxArm-master/read_camera_intrinsics.py. "
+                "No distortion coefficients supplied; assumed zero.",
             ),
             extrinsics=CameraExtrinsics(
-                T_cam_in_base=None,
+                T_cam_in_base=np.array(
+                    [
+                        [-0.04450456948656329, 0.8667565391460602, -0.49674182946713885, 0.06198127016884403],
+                        [0.9987423482053, 0.05009420964901288, -0.002071728989170475, -0.34529807185210487],
+                        [0.023088204698059066, -0.4962093026205628, -0.8678958824632338, 0.8308843930732169],
+                        [0.0, 0.0, 0.0, 1.0],
+                    ]
+                ),
                 camera_height_m=None,
                 pitch_down_deg=None,
                 optical_projection_base=None,
                 camera_target_base=None,
-                notes="Soft extrinsic used by export_robot_eef_from_wilor.py defaults "
-                "until T_cam_in_base is measured.",
+                notes="Solved by patches/calibrate_realsense_extrinsic_from_apriltags.py from "
+                "tags 1+2 top_left corners (examples/calib/tag_corners_base.json) + "
+                "nero-data-collect-win-tcp-end/pyAgxArm-master/output1.png, reprojection RMSE "
+                "0.477 px. Full result: outputs/camera_extrinsics/camera_extrinsics.json. "
+                "Supersedes the soft camera_height_m/pitch_down_deg estimate used by "
+                "export_robot_eef_from_wilor.py's CLI defaults.",
             ),
             capture={},
         ),
     },
     apriltag=AprilTagBoard(
         dictionary="DICT_APRILTAG_36h11",
-        tag_size_m=None,  # measure printed black square edge [m]
-        tag_ids=[1],  # nero_pick_place_human currently detects id=1
-        T_tag_in_base=None,  # measure tag center pose in robot base
-        notes="Use patches/estimate_scale_apriltag.py to fill T_cam_in_base + scale.",
+        tag_size_m=0.05,
+        tag_ids=[1, 2],
+        # Not filled: our calibration solves each tag's yaw jointly with the camera pose
+        # (see solved_yaw_deg_by_tag in camera_extrinsics.json) but doesn't need or emit a
+        # single T_tag_in_base — T_cam_in_base above was solved directly, so this is not
+        # required for the current pipeline. Fill in only if some other script needs it.
+        T_tag_in_base=None,
+        notes="tag_corners_base.json collected via "
+        "nero-data-collect-win-tcp-end/pyAgxArm-master/collect_apriltag_corners.py "
+        "(top_left corner only, tcp_offset=0.13 m). "
+        "Use patches/estimate_scale_apriltag.py to fill VGGT depth scale separately.",
     ),
     extra_transforms={
-        # Hand mid-point local frame → EE/TCP local correction (4×4), if any.
-        "T_hand_to_ee": None,
-        # Optional axis-align remaining after main hand→cam pipeline.
-        "T_ee_axis_correct": None,
+        # = inv(export_robot_eef_from_wilor.DEFAULT_T_ALIGN); this rotation is self-inverse.
+        "T_hand_to_ee": np.array(
+            [
+                [-1.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        ),
+        # = apply_humanego_eef_axis_correction.DEFAULT_C_REAL_FROM_HUMANEGO, embedded as a
+        # 4x4 (rotation only, zero translation): real x=HumanEgo z, real y=-HumanEgo y,
+        # real z=HumanEgo x. Empirically observed, not derived from a calibration script.
+        "T_ee_axis_correct": np.array(
+            [
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, -1.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        ),
     },
-    notes="Primary Nero humanego→robot cell. All numeric fields intentionally blank.",
+    notes="Primary Nero humanego→robot cell. Camera intrinsics/extrinsics and AprilTag "
+    "geometry calibrated 2026-08-10; workspace_center/half_size and T_base_in_world still "
+    "blank (not needed by the current pipeline).",
 )
 
 

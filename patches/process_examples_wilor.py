@@ -18,6 +18,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from assets import DEFAULT_ASSETS
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -63,7 +65,34 @@ def estimate_intrinsics(width: int, height: int, vfov_deg: float) -> list[list[f
     ]
 
 
-def prepare_video(video_path: Path, out_root: Path, vfov_deg: float) -> Path:
+def intrinsics_from_assets(width: int, height: int) -> list[list[float]] | None:
+    """scene_rgb intrinsics from patches/assets.py, scaled to (width, height).
+
+    Returns None if the assets camera intrinsics aren't filled in yet.
+    """
+    intr = DEFAULT_ASSETS.camera().intrinsics
+    if not intr.is_filled():
+        return None
+    sx = width / intr.width if intr.width else 1.0
+    sy = height / intr.height if intr.height else 1.0
+    return [
+        [intr.fx * sx, 0.0, intr.cx * sx],
+        [0.0, intr.fy * sy, intr.cy * sy],
+        [0.0, 0.0, 1.0],
+    ]
+
+
+def resolve_intrinsics(width: int, height: int, vfov_deg: float, k_source: str) -> tuple[list[list[float]], str]:
+    """Pick camera K for these video frames; returns (K, source actually used)."""
+    if k_source == "assets":
+        k = intrinsics_from_assets(width, height)
+        if k is not None:
+            return k, "assets"
+        print("[process_examples_wilor] assets camera intrinsics not filled; falling back to --vfov-deg guess.")
+    return estimate_intrinsics(width, height, vfov_deg), "vfov"
+
+
+def prepare_video(video_path: Path, out_root: Path, vfov_deg: float, k_source: str) -> Path:
     session_dir = out_root / video_path.stem
     all_data_dir = session_dir / "preprocess" / "all_data"
     vis_dir = session_dir / "preprocess" / "vis"
@@ -77,7 +106,8 @@ def prepare_video(video_path: Path, out_root: Path, vfov_deg: float) -> Path:
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    k = estimate_intrinsics(width, height, vfov_deg)
+    k, k_source_used = resolve_intrinsics(width, height, vfov_deg, k_source)
+    print(f"[process_examples_wilor] {video_path.name}: K source = {k_source_used}  K={k}")
     c2w = np.eye(4).tolist()
     d = [0.0] * 8
 
@@ -95,7 +125,8 @@ def prepare_video(video_path: Path, out_root: Path, vfov_deg: float) -> Path:
         cam_json = {
             "idx": idx,
             "ts": ts,
-            "fov": vfov_deg,
+            "fov": vfov_deg if k_source_used == "vfov" else None,
+            "k_source": k_source_used,
             "h": height,
             "w": width,
             "k": k,
@@ -121,6 +152,7 @@ def prepare_video(video_path: Path, out_root: Path, vfov_deg: float) -> Path:
         "h": height,
         "w": width,
         "k": k,
+        "k_source": k_source_used,
         "d": d,
         "c2d": c2w,
         "source_video": str(video_path),
@@ -145,7 +177,15 @@ def main() -> None:
     parser.add_argument("--out", default="outputs")
     parser.add_argument("--cfg", default="cfg/preprocess/base/AriaHands.yaml")
     parser.add_argument("--wilor-pretrained-dir", default=None)
-    parser.add_argument("--vfov-deg", type=float, default=70.0)
+    parser.add_argument(
+        "--k-source",
+        choices=["assets", "vfov"],
+        default="assets",
+        help="'assets' (default) uses the calibrated scene_rgb intrinsics from patches/assets.py "
+        "(DEFAULT_ASSETS), scaled to each video's resolution; 'vfov' estimates K from "
+        "--vfov-deg instead (for videos not captured by the calibrated scene camera).",
+    )
+    parser.add_argument("--vfov-deg", type=float, default=70.0, help="Only used when --k-source vfov.")
     parser.add_argument("--gif", action="store_true")
     args = parser.parse_args()
 
@@ -161,7 +201,7 @@ def main() -> None:
     for video in args.videos:
         video_path = Path(video)
         print(f"[process_examples_wilor] Preparing {video_path}")
-        session_dir = prepare_video(video_path, out_root, args.vfov_deg)
+        session_dir = prepare_video(video_path, out_root, args.vfov_deg, args.k_source)
         print(f"[process_examples_wilor] Running WiLoR on {session_dir}")
         wilor_hands_module.run_wilor_hands(
             mps_path=str(session_dir),

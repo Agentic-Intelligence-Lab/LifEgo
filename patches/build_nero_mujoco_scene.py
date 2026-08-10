@@ -6,15 +6,17 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import shutil
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
 
+from assets import DEFAULT_ASSETS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-URDF_ROOT = Path("/home/ymq/code/agx_arm_urdf")
+URDF_ROOT = Path(os.environ.get("AGX_ARM_URDF_ROOT", str(REPO_ROOT / "thirdparty" / "agx_arm_urdf")))
 NERO_ROOT = URDF_ROOT / "nero"
 
 LINK_COLORS = {
@@ -307,21 +309,58 @@ def add_axis(worldbody: ET.Element) -> None:
     ET.SubElement(worldbody, "site", {"name": "robot_left_front_workspace_xneg_yneg", "pos": "-0.35 -0.25 0.025", "size": "0.025", "rgba": "1 0.8 0.05 1"})
 
 
-def add_camera_setup(worldbody: ET.Element, camera_y: float, camera_height: float) -> None:
-    camera_pos = np.array([0.0, camera_y, camera_height], dtype=np.float64)
-    target = np.array([-camera_height, camera_y, 0.0], dtype=np.float64)
-    x_axis = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-    z_axis = np.array([math.sqrt(0.5), 0.0, math.sqrt(0.5)], dtype=np.float64)
-    y_axis = np.cross(z_axis, x_axis)
-    y_axis /= np.linalg.norm(y_axis)
+def add_camera_setup(
+    worldbody: ET.Element,
+    camera_y: float,
+    camera_height: float,
+    camera_source: str = "assets",
+) -> None:
+    """Place the ego_camera in the scene.
+
+    camera_source="assets" (default) uses the calibrated T_cam_in_base (and, for
+    fovy, the intrinsics fy/height) from patches/assets.py DEFAULT_ASSETS.
+    camera_source="soft" falls back to the fixed 45deg-pitch/camera_y/camera_height
+    approximation, for setups without a calibration yet.
+    """
+    cam_asset = DEFAULT_ASSETS.camera()
+    if camera_source == "assets" and cam_asset is not None and cam_asset.extrinsics.is_filled():
+        T_cam_in_base = cam_asset.extrinsics.T_cam_in_base
+        camera_pos = T_cam_in_base[:3, 3].copy()
+        R_cam_in_base = T_cam_in_base[:3, :3]
+        # T_cam_in_base columns are the OpenCV camera axes (x-right, y-down,
+        # z-forward) expressed in base; MuJoCo cameras look down local -z with
+        # +y up, so flip y (and z falls out via MuJoCo's internal x-cross-y).
+        x_axis = R_cam_in_base[:, 0].copy()
+        y_axis = -R_cam_in_base[:, 1].copy()
+        z_forward = R_cam_in_base[:, 2].copy()
+        if abs(z_forward[2]) > 1e-9:
+            t = -camera_pos[2] / z_forward[2]
+            target = camera_pos + t * z_forward
+        else:
+            target = camera_pos + z_forward
+        cam_name = "ego_camera_calibrated"
+        fovy = 70.0
+        intr = cam_asset.intrinsics
+        if intr.is_filled() and intr.height:
+            fovy = math.degrees(2.0 * math.atan((intr.height * 0.5) / intr.fy))
+    else:
+        camera_pos = np.array([0.0, camera_y, camera_height], dtype=np.float64)
+        target = np.array([-camera_height, camera_y, 0.0], dtype=np.float64)
+        x_axis = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        z_axis = np.array([math.sqrt(0.5), 0.0, math.sqrt(0.5)], dtype=np.float64)
+        y_axis = np.cross(z_axis, x_axis)
+        y_axis /= np.linalg.norm(y_axis)
+        cam_name = "ego_camera_45deg_585mm"
+        fovy = 70.0
+
     ET.SubElement(
         worldbody,
         "camera",
         {
-            "name": "ego_camera_45deg_585mm",
+            "name": cam_name,
             "pos": fmt(camera_pos),
             "xyaxes": fmt(list(x_axis) + list(y_axis)),
-            "fovy": "70",
+            "fovy": f"{fovy:.3f}",
         },
     )
     ET.SubElement(worldbody, "body", {"name": "camera_body", "pos": fmt(camera_pos)})
@@ -547,6 +586,7 @@ def build_scene(
     include_trajectories: bool,
     camera_y: float,
     camera_height: float,
+    camera_source: str,
     humanego_eef_path: Path,
     realbot_path: Path | None,
     real_path_every: int,
@@ -582,7 +622,7 @@ def build_scene(
     ET.SubElement(worldbody, "geom", {"name": "table_top_z0", "type": "box", "pos": "-0.25 0  -0.025", "size": "0.75 0.65 0.025", "material": "table_mat"})
     ET.SubElement(worldbody, "geom", {"name": "left_front_workspace_patch", "type": "box", "pos": "-0.35 -0.25 0.002", "size": "0.30 0.24 0.002", "material": "workspace_mat", "contype": "0", "conaffinity": "0"})
     add_axis(worldbody)
-    add_camera_setup(worldbody, camera_y=camera_y, camera_height=camera_height)
+    add_camera_setup(worldbody, camera_y=camera_y, camera_height=camera_height, camera_source=camera_source)
 
     base_body = ET.SubElement(worldbody, "body", {"name": "base_link", "pos": "0 0 0", "quat": "1 0 0 0"})
     add_body_recursive(base_body, "base_link", links, children)
@@ -626,12 +666,26 @@ def write_readme(
     scene_path: Path,
     camera_y: float,
     camera_height: float,
+    camera_source: str,
     humanego_eef_path: Path,
     realbot_path: Path | None,
 ) -> None:
+    if camera_source == "assets" and DEFAULT_ASSETS.camera().extrinsics.is_filled():
+        p_cam = DEFAULT_ASSETS.camera().extrinsics.T_cam_in_base[:3, 3].tolist()
+        camera_desc = (
+            f"- Camera pose comes from the calibrated T_cam_in_base in `patches/assets.py` "
+            f"(DEFAULT_ASSETS), position `{p_cam}` m in robot base."
+        )
+    else:
+        camera_desc = (
+            f"- Camera is at `[0, {camera_y}, {camera_height}]` m, height `{camera_height}` m, "
+            "pitched down 45 deg (soft approximation, --camera-source soft).\n"
+            f"- Camera optical-axis table intersection is `[-{camera_height}, {camera_y}, 0]`, "
+            "so its table projection points along base `-x`."
+        )
     readme = f"""# Nero MuJoCo Scene
 
-Generated from `/home/ymq/code/agx_arm_urdf/nero`.
+Generated from `{NERO_ROOT}`.
 
 Files:
 - `scene.xml`: MuJoCo MJCF scene.
@@ -642,8 +696,7 @@ Scene convention:
 - Base `+x` points backward, base `-x` is the front direction.
 - Base `+y` points to robot right, base `-y` points to robot left.
 - The highlighted yellow patch is the robot-left-front workspace (`x<0, y<0`).
-- Camera is at `[0, {camera_y}, {camera_height}]` m, height `{camera_height}` m, pitched down 45 deg.
-- Camera optical-axis table intersection is `[-{camera_height}, {camera_y}, 0]`, so its table projection points along base `-x`.
+{camera_desc}
 
 Optional trajectory markers:
 - Yellow sites: real robot `flange_pose` samples from `{realbot_path}`.
@@ -680,6 +733,14 @@ data = mujoco.MjData(model)
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", default="outputs/mujoco_nero_scene")
+    parser.add_argument(
+        "--camera-source",
+        choices=["assets", "soft"],
+        default="assets",
+        help="'assets' (default) places the camera from the calibrated T_cam_in_base / "
+        "intrinsics in patches/assets.py (DEFAULT_ASSETS); 'soft' uses the fixed "
+        "45deg-pitch --camera-y/--camera-height approximation instead.",
+    )
     parser.add_argument("--camera-y", type=float, default=-0.45)
     parser.add_argument("--camera-height", type=float, default=0.585)
     parser.add_argument(
@@ -702,6 +763,7 @@ def main() -> None:
         include_trajectories=not args.no_trajectories,
         camera_y=args.camera_y,
         camera_height=args.camera_height,
+        camera_source=args.camera_source,
         humanego_eef_path=humanego_eef_path,
         realbot_path=realbot_path,
         real_path_every=args.real_path_every,
@@ -709,7 +771,7 @@ def main() -> None:
         real_frame_every=args.real_frame_every,
         humanego_frame_every=args.humanego_frame_every,
     )
-    write_readme(out_dir, scene_path, args.camera_y, args.camera_height, humanego_eef_path, realbot_path)
+    write_readme(out_dir, scene_path, args.camera_y, args.camera_height, args.camera_source, humanego_eef_path, realbot_path)
     print(f"Wrote {scene_path}")
     print(f"Wrote {out_dir / 'README.md'}")
 

@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
+from assets import DEFAULT_ASSETS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -121,12 +122,23 @@ def export_eef(args: argparse.Namespace) -> None:
     T_align = np.array(json.loads(args.t_align_json), dtype=np.float64) if args.t_align_json else DEFAULT_T_ALIGN
     T_hand_to_ee = np.linalg.inv(T_align)
 
-    T_base_in_cam, T_cam_in_base, p_cam_in_base = make_camera_transforms(
-        camera_height_m=args.camera_height_m,
-        pitch_down_deg=args.pitch_down_deg,
-        optical_projection_base=parse_vec3(args.optical_projection_base, "optical_projection_base"),
-        camera_target_base=parse_vec3(args.camera_target_base, "camera_target_base"),
-    )
+    if args.camera_source == "assets":
+        cam_extr = DEFAULT_ASSETS.camera().extrinsics
+        if not cam_extr.is_filled():
+            raise ValueError(
+                "patches/assets.py DEFAULT_ASSETS camera extrinsics are not filled; "
+                "run patches/calibrate_realsense_extrinsic_from_apriltags.py or pass --camera-source soft."
+            )
+        T_cam_in_base = cam_extr.T_cam_in_base.copy()
+        T_base_in_cam = np.linalg.inv(T_cam_in_base)
+        p_cam_in_base = T_cam_in_base[:3, 3].copy()
+    else:
+        T_base_in_cam, T_cam_in_base, p_cam_in_base = make_camera_transforms(
+            camera_height_m=args.camera_height_m,
+            pitch_down_deg=args.pitch_down_deg,
+            optical_projection_base=parse_vec3(args.optical_projection_base, "optical_projection_base"),
+            camera_target_base=parse_vec3(args.camera_target_base, "camera_target_base"),
+        )
 
     records = []
     frame_dirs = sorted(p for p in all_data_dir.iterdir() if p.is_dir() and p.name.isdigit())
@@ -178,14 +190,18 @@ def export_eef(args: argparse.Namespace) -> None:
             "z": "up from table",
         },
         "camera_setup": {
+            "camera_source": args.camera_source,
             "camera_height_m": args.camera_height_m,
             "pitch_down_deg": args.pitch_down_deg,
             "optical_projection_base": args.optical_projection_base,
             "camera_target_base_m": args.camera_target_base,
             "camera_position_base_m": p_cam_in_base.tolist(),
             "assumption": (
-                "camera_target_base is the table point hit by the optical axis. "
-                "Defaults match patches/build_nero_mujoco_scene.py."
+                "camera_source='assets' (default) uses the calibrated T_cam_in_base from "
+                "patches/assets.py (DEFAULT_ASSETS); camera_height_m/pitch_down_deg/"
+                "optical_projection_base/camera_target_base are ignored in that mode. "
+                "camera_source='soft' reconstructs T_cam_in_base from those params instead "
+                "(camera_target_base is the table point hit by the optical axis)."
             ),
         },
         "T_align_hand_from_ee": T_align.tolist(),
@@ -278,6 +294,14 @@ def main() -> None:
     parser.add_argument("--out", default="outputs/ego_nero_easy/robot_eef_scene_camera")
     parser.add_argument("--hand-key", default="hand_r", choices=["hand_r", "hand_l"])
     parser.add_argument("--pose-key", default="midpoint_pose_opt_world")
+    parser.add_argument(
+        "--camera-source",
+        choices=["assets", "soft"],
+        default="assets",
+        help="'assets' (default) uses the calibrated T_cam_in_base from patches/assets.py "
+        "(DEFAULT_ASSETS); 'soft' reconstructs it from --camera-height-m/--pitch-down-deg/"
+        "--optical-projection-base/--camera-target-base instead.",
+    )
     parser.add_argument("--camera-height-m", type=float, default=0.585)
     parser.add_argument("--pitch-down-deg", type=float, default=45.0)
     parser.add_argument("--optical-projection-base", nargs=3, type=float, default=[-1.0, 0.0, 0.0])

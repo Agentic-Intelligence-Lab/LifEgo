@@ -50,6 +50,7 @@ import numpy as np
 from cv2 import aruco
 from scipy.spatial.transform import Rotation as R
 
+from assets import DEFAULT_ASSETS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -114,6 +115,21 @@ def estimate_K_from_vfov(width: int, height: int, vfov_deg: float) -> np.ndarray
     return np.array([[fx, 0.0, width * 0.5], [0.0, fy, height * 0.5], [0.0, 0.0, 1.0]], dtype=np.float64)
 
 
+def K_from_assets(width: int, height: int) -> tuple[np.ndarray, np.ndarray] | None:
+    """scene_rgb intrinsics from patches/assets.py, scaled to (width, height)."""
+    intr = DEFAULT_ASSETS.camera().intrinsics
+    if not intr.is_filled():
+        return None
+    sx = width / intr.width if intr.width else 1.0
+    sy = height / intr.height if intr.height else 1.0
+    K = np.array(
+        [[intr.fx * sx, 0.0, intr.cx * sx], [0.0, intr.fy * sy, intr.cy * sy], [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
+    dist = np.zeros(5, dtype=np.float64) if intr.dist_coeffs is None else intr.dist_coeffs.copy()
+    return K, dist
+
+
 def parse_K_cli(args: argparse.Namespace, width: int, height: int) -> tuple[np.ndarray, np.ndarray]:
     if args.fx is not None and args.fy is not None:
         cx = args.cx if args.cx is not None else width * 0.5
@@ -125,6 +141,12 @@ def parse_K_cli(args: argparse.Namespace, width: int, height: int) -> tuple[np.n
         K = np.asarray(data["K"] if "K" in data else data["k"], dtype=np.float64)
         d = np.asarray(data.get("d", data.get("dist", [0, 0, 0, 0, 0])), dtype=np.float64).reshape(-1)
         return K, d
+    if args.k_fallback == "assets":
+        from_assets = K_from_assets(width, height)
+        if from_assets is not None:
+            print("[apriltag] K from patches/assets.py (DEFAULT_ASSETS scene_rgb)")
+            return from_assets
+        print("[apriltag] assets camera intrinsics not filled; falling back to --vfov-deg guess.")
     return estimate_K_from_vfov(width, height, args.vfov_deg), np.zeros(5, dtype=np.float64)
 
 
@@ -686,7 +708,15 @@ def main() -> None:
     p.add_argument("--tag-id", type=int, default=1, help="Only use this tag id (−1 = all)")
     p.add_argument("--frame-stride", type=int, default=1)
     p.add_argument("--max-frames", type=int, default=0, help="0 = all")
-    p.add_argument("--vfov-deg", type=float, default=70.0, help="Fallback K if no aria_cam / --fx")
+    p.add_argument(
+        "--k-fallback",
+        choices=["assets", "vfov"],
+        default="assets",
+        help="When no --fx/--K-json is given and the session has no aria_cam_rgb.json: "
+        "'assets' (default) uses the calibrated scene_rgb intrinsics from patches/assets.py "
+        "(DEFAULT_ASSETS), scaled to the frame resolution; 'vfov' estimates K from --vfov-deg.",
+    )
+    p.add_argument("--vfov-deg", type=float, default=70.0, help="Used only when --k-fallback vfov.")
     p.add_argument("--fx", type=float, default=None)
     p.add_argument("--fy", type=float, default=None)
     p.add_argument("--cx", type=float, default=None)
