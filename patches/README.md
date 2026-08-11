@@ -293,6 +293,10 @@ outputs/nero_pick_place_human/mujoco_nero_scene/replays/nero_pick_place_realbot_
 
 | 脚本 | 用途 |
 |--|--|
+| `nero_mjlab_env.py` | 基于 `thirdparty/mjlab` / MuJoCo Warp 的 Nero IK residual-control RL 环境骨架；reward 先留空 |
+| `nero_mjlab_task.py` | 把 Nero 环境注册为 mjlab task：`Mjlab-Nero-IK-Residual` |
+| `play_nero_mjlab.py` | 注册 Nero task 后委托 mjlab 官方 `play` 入口 |
+| `train_nero_mjlab.py` | 注册 Nero task 后委托 mjlab 官方 `train` 入口 |
 | `estimate_scale_apriltag.py` | AprilTag 检测 + PnP / VGGT 深度尺度 `s` / 可选 `T_cam_in_base` 与 EEF 修正 |
 | `run_vggt_omega_infer.py` | VGGT-Ω 本地推理 smoke test（深度/相机姿态；后续做物体尺寸尺度校正） |
 | `replay_nero_realbot_data_mujoco.py` | 仅真机关节回放；隐藏场景内 HumanEgo 烘焙轨迹；品红 TCP / 橙 tip |
@@ -300,6 +304,40 @@ outputs/nero_pick_place_human/mujoco_nero_scene/replays/nero_pick_place_realbot_
 | `view_nero_zero_pose_frames.py` | 零位三色 viewer（法兰 / TCP / 尖端） |
 | `nero_tcp_frames.py` | 坐标约定辅助 |
 | `apply_realbot_tcp_orientation_correction.py` | 实验，非主流程 |
+
+RL 环境骨架：
+
+```bash
+# mjlab 版（当前推荐）：只编译 mjlab scene，不启动 MuJoCo Warp
+$PY patches/nero_mjlab_env.py \
+  --scene outputs/mujoco_nero_scene/scene.xml \
+  --ik outputs/ego_nero_easy/nero_eef_ik/nero_eef_ik.npz
+
+# mjlab 官方 play：dummy policy + Viser 浏览器 viewer
+$PY patches/play_nero_mjlab.py Mjlab-Nero-IK-Residual \
+  --agent zero \
+  --viewer viser \
+  --device cuda:0
+
+# 有本地图形界面时也可用 MuJoCo native viewer
+$PY patches/play_nero_mjlab.py Mjlab-Nero-IK-Residual \
+  --agent zero \
+  --viewer native \
+  --device cuda:0
+
+# mjlab 版：显式启动 MuJoCo Warp env 并 step
+$PY patches/nero_mjlab_env.py \
+  --check env \
+  --device cuda:0 \
+  --num-envs 16 \
+  --scene outputs/mujoco_nero_scene/scene.xml \
+  --ik outputs/ego_nero_easy/nero_eef_ik/nero_eef_ik.npz
+```
+
+说明：
+
+- 当前骨架把动作定义成 8 维 residual：7 轴关节 + 1 个夹爪开口残差。
+- reward 现在留空；后续把 object tracking / contact / smoothness 填进去即可。
 
 仅真机：
 
