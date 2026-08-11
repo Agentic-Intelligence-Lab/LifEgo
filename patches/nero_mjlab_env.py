@@ -9,6 +9,7 @@ problem: no interaction object, no object-tracking reward.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -28,21 +29,29 @@ import torch
 from mjlab.actuator import XmlActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
-from mjlab.envs.mdp import joint_pos_rel, joint_vel_rel, last_action, time_out
+from mjlab.envs.mdp import action_rate_l2, joint_pos_rel, joint_vel_rel, last_action, time_out
 from mjlab.managers import ActionTerm, ActionTermCfg
 from mjlab.managers.command_manager import CommandTerm, CommandTermCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
+from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.scene import SceneCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.viewer import ViewerConfig
+from mjlab.utils.lab_api.math import quat_error_magnitude
 
 if TYPE_CHECKING:
   from mjlab.viewer.debug_visualizer import DebugVisualizer
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_SCENE_PATH = "outputs/mujoco_nero_scene/scene.xml"
+DEFAULT_EEF_PATH = (
+  "outputs/ego_nero_easy/robot_eef_scene_camera_axis_corrected/"
+  "robot_eef_trajectory.json"
+)
+DEFAULT_MINK_IK_PATH = "outputs/ego_nero_easy/nero_eef_ik/nero_eef_ik.npz"
 ARM_JOINTS = tuple(f"joint{i}" for i in range(1, 8))
 GRIPPER_JOINTS = ("gripper_joint1", "gripper_joint2")
 ALL_JOINTS = ARM_JOINTS + GRIPPER_JOINTS
@@ -102,9 +111,19 @@ def get_nero_robot_cfg(scene_path: str | Path) -> EntityCfg:
 
 
 class NeroIkReference:
-  """Tensorized IK reference trajectory loaded from solve_nero_eef_ik.py output."""
+  """Tensorized EEF target and mink IK seed trajectories."""
 
-  def __init__(self, ik_path: str | Path, device: str):
+  def __init__(self, *, eef_path: str | Path, ik_path: str | Path, device: str):
+    self.eef_path = as_abs(eef_path)
+    self.ik_path = as_abs(ik_path)
+    eef = self._load_eef(self.eef_path)
+    self.eef_pos = torch.tensor(eef["pos"], dtype=torch.float32, device=device)
+    self.eef_quat_xyzw = torch.tensor(
+      eef["quat_xyzw"], dtype=torch.float32, device=device
+    )
+    self.grasp = torch.tensor(eef["grasp"], dtype=torch.float32, device=device)
+    self.eef_time_s = torch.tensor(eef["time_s"], dtype=torch.float32, device=device)
+
     data = np.load(as_abs(ik_path), allow_pickle=True)
     self.arm_joint_pos = torch.tensor(
       np.asarray(data["joint_qpos"], dtype=np.float32), device=device
@@ -121,6 +140,11 @@ class NeroIkReference:
         self.arm_joint_pos.shape[0], dtype=torch.float32, device=device
       )
     self.num_frames = int(self.arm_joint_pos.shape[0])
+    if self.eef_pos.shape[0] != self.num_frames:
+      raise ValueError(
+        f"EEF frames ({self.eef_pos.shape[0]}) must match IK frames "
+        f"({self.num_frames})"
+      )
     if self.arm_joint_pos.ndim != 2 or self.arm_joint_pos.shape[1] != len(ARM_JOINTS):
       raise ValueError(
         f"Expected joint_qpos shape (T, {len(ARM_JOINTS)}), got "
@@ -129,11 +153,63 @@ class NeroIkReference:
     if self.gripper_width.shape[0] != self.num_frames:
       raise ValueError("gripper_width_m length must match joint_qpos frames")
 
+  @staticmethod
+  def _load_eef(path: Path) -> dict[str, np.ndarray]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    records = data.get("records")
+    if not isinstance(records, list):
+      raise ValueError(f"Expected EEF JSON with a records list: {path}")
+
+    times: list[float] = []
+    pos: list[np.ndarray] = []
+    quat_xyzw: list[np.ndarray] = []
+    grasp: list[float] = []
+    for i, rec in enumerate(records):
+      if not rec.get("valid"):
+        continue
+      transform = rec.get("T_ee_in_base")
+      if not isinstance(transform, dict):
+        raise ValueError(f"Missing T_ee_in_base in record {i}: {path}")
+      if "translation_m" in transform:
+        p = np.asarray(transform["translation_m"], dtype=np.float32)
+      else:
+        T = np.asarray(transform["T"], dtype=np.float32)
+        p = T[:3, 3]
+      if "quat_xyzw" not in transform:
+        raise ValueError(f"Missing T_ee_in_base.quat_xyzw in record {i}: {path}")
+      q = np.asarray(transform["quat_xyzw"], dtype=np.float32)
+      stamp = rec.get("ts")
+      times.append(float(stamp) * 1e-9 if stamp is not None else i / 30.0)
+      pos.append(p)
+      quat_xyzw.append(q)
+      grasp.append(1.0 if float(rec.get("grasp") or 0.0) > 0.5 else 0.0)
+
+    if not pos:
+      raise ValueError(f"No valid EEF records found in {path}")
+
+    time_s = np.asarray(times, dtype=np.float32)
+    time_s -= time_s[0]
+    return {
+      "time_s": time_s,
+      "pos": np.asarray(pos, dtype=np.float32),
+      "quat_xyzw": np.asarray(quat_xyzw, dtype=np.float32),
+      "grasp": np.asarray(grasp, dtype=np.float32),
+    }
+
   def arm(self, frame_ids: torch.Tensor) -> torch.Tensor:
     return self.arm_joint_pos[frame_ids]
 
   def width(self, frame_ids: torch.Tensor) -> torch.Tensor:
     return self.gripper_width[frame_ids]
+
+  def eef_position(self, frame_ids: torch.Tensor) -> torch.Tensor:
+    return self.eef_pos[frame_ids]
+
+  def eef_quaternion_xyzw(self, frame_ids: torch.Tensor) -> torch.Tensor:
+    return self.eef_quat_xyzw[frame_ids]
+
+  def grasp_state(self, frame_ids: torch.Tensor) -> torch.Tensor:
+    return self.grasp[frame_ids]
 
   def full_joint_pos(self, frame_ids: torch.Tensor) -> torch.Tensor:
     arm = self.arm(frame_ids)
@@ -147,14 +223,28 @@ class NeroIkCommand(CommandTerm):
   def __init__(self, cfg: "NeroIkCommandCfg", env: ManagerBasedRlEnv):
     super().__init__(cfg, env)
     self.robot = env.scene[cfg.entity_name]
-    self.reference = NeroIkReference(cfg.ik_file, self.device)
+    self.reference = NeroIkReference(
+      eef_path=cfg.eef_file,
+      ik_path=cfg.ik_file,
+      device=self.device,
+    )
     self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
     self.metrics["ref_progress"] = torch.zeros(self.num_envs, device=self.device)
 
   @property
   def command(self) -> torch.Tensor:
     progress = self.progress.unsqueeze(-1)
-    return torch.cat((self.arm_joint_pos, self.gripper_width.unsqueeze(-1), progress), dim=-1)
+    return torch.cat(
+      (
+        self.arm_joint_pos,
+        self.gripper_width.unsqueeze(-1),
+        self.eef_pos,
+        self.eef_quat_xyzw,
+        self.grasp.unsqueeze(-1),
+        progress,
+      ),
+      dim=-1,
+    )
 
   @property
   def progress(self) -> torch.Tensor:
@@ -168,6 +258,18 @@ class NeroIkCommand(CommandTerm):
   @property
   def gripper_width(self) -> torch.Tensor:
     return self.reference.width(self.time_steps)
+
+  @property
+  def eef_pos(self) -> torch.Tensor:
+    return self.reference.eef_position(self.time_steps)
+
+  @property
+  def eef_quat_xyzw(self) -> torch.Tensor:
+    return self.reference.eef_quaternion_xyzw(self.time_steps)
+
+  @property
+  def grasp(self) -> torch.Tensor:
+    return self.reference.grasp_state(self.time_steps)
 
   @property
   def target_joint_pos(self) -> torch.Tensor:
@@ -216,6 +318,7 @@ class NeroIkCommand(CommandTerm):
 
 @dataclass(kw_only=True)
 class NeroIkCommandCfg(CommandTermCfg):
+  eef_file: str
   ik_file: str
   entity_name: str = "robot"
   sampling_mode: Literal["start", "uniform"] = "start"
@@ -298,7 +401,25 @@ def nero_reference_command(env: ManagerBasedRlEnv, command_name: str = "ik_ref")
   command = env.command_manager.get_term(command_name)
   if not isinstance(command, NeroIkCommand):
     raise TypeError(f"Expected NeroIkCommand, got {type(command).__name__}")
-  return command.command
+  return command.command.to(torch.float32)
+
+
+def nero_joint_pos_rel(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", joint_names=ALL_JOINTS),
+) -> torch.Tensor:
+  return joint_pos_rel(env, asset_cfg=asset_cfg).to(torch.float32)
+
+
+def nero_joint_vel_rel(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", joint_names=ALL_JOINTS),
+) -> torch.Tensor:
+  return joint_vel_rel(env, asset_cfg=asset_cfg).to(torch.float32)
+
+
+def nero_last_action(env: ManagerBasedRlEnv) -> torch.Tensor:
+  return last_action(env).to(torch.float32)
 
 
 def nero_joint_target_error(
@@ -310,13 +431,40 @@ def nero_joint_target_error(
   command = env.command_manager.get_term(command_name)
   if not isinstance(command, NeroIkCommand):
     raise TypeError(f"Expected NeroIkCommand, got {type(command).__name__}")
-  return robot.data.joint_pos[:, asset_cfg.joint_ids] - command.target_joint_pos
+  return (robot.data.joint_pos[:, asset_cfg.joint_ids] - command.target_joint_pos).to(
+    torch.float32
+  )
+
+
+def nero_tcp_tracking_reward(
+  env: ManagerBasedRlEnv,
+  command_name: str = "ik_ref",
+  asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", site_names=("tcp",)),
+  pos_std: float = 0.05,
+  ori_std: float = 0.5,
+) -> torch.Tensor:
+  robot = env.scene[asset_cfg.name]
+  command = env.command_manager.get_term(command_name)
+  if not isinstance(command, NeroIkCommand):
+    raise TypeError(f"Expected NeroIkCommand, got {type(command).__name__}")
+  current_pos = robot.data.site_pos_w[:, asset_cfg.site_ids].squeeze(1)
+  target_pos = command.eef_pos
+  pos_error = torch.sum(torch.square(current_pos - target_pos), dim=-1)
+
+  current_quat_w = robot.data.site_quat_w[:, asset_cfg.site_ids].squeeze(1)
+  target_quat_xyzw = command.eef_quat_xyzw
+  target_quat_w = torch.cat(
+    (target_quat_xyzw[:, 3:4], target_quat_xyzw[:, 0:3]), dim=-1
+  )
+  ori_error = quat_error_magnitude(target_quat_w, current_quat_w) ** 2
+  return torch.exp(-pos_error / (pos_std**2)) * torch.exp(-ori_error / (ori_std**2))
 
 
 def make_nero_mjlab_env_cfg(
   *,
-  scene: str | Path = "outputs/mujoco_nero_scene/scene.xml",
-  ik: str | Path = "outputs/ego_nero_easy/nero_eef_ik/nero_eef_ik.npz",
+  scene: str | Path = DEFAULT_SCENE_PATH,
+  eef: str | Path = DEFAULT_EEF_PATH,
+  ik: str | Path = DEFAULT_MINK_IK_PATH,
   num_envs: int = 1,
   episode_length_s: float = 2.4,
   sampling_mode: Literal["start", "uniform"] = "start",
@@ -328,16 +476,16 @@ def make_nero_mjlab_env_cfg(
     "actor": ObservationGroupCfg(
       terms={
         "joint_pos": ObservationTermCfg(
-          func=joint_pos_rel,
+          func=nero_joint_pos_rel,
           params={"asset_cfg": robot_cfg},
         ),
         "joint_vel": ObservationTermCfg(
-          func=joint_vel_rel,
+          func=nero_joint_vel_rel,
           params={"asset_cfg": robot_cfg},
         ),
         "ik_ref": ObservationTermCfg(func=nero_reference_command),
         "joint_target_error": ObservationTermCfg(func=nero_joint_target_error),
-        "actions": ObservationTermCfg(func=last_action),
+        "actions": ObservationTermCfg(func=nero_last_action),
       },
       concatenate_terms=True,
       enable_corruption=False,
@@ -345,16 +493,16 @@ def make_nero_mjlab_env_cfg(
     "critic": ObservationGroupCfg(
       terms={
         "joint_pos": ObservationTermCfg(
-          func=joint_pos_rel,
+          func=nero_joint_pos_rel,
           params={"asset_cfg": robot_cfg},
         ),
         "joint_vel": ObservationTermCfg(
-          func=joint_vel_rel,
+          func=nero_joint_vel_rel,
           params={"asset_cfg": robot_cfg},
         ),
         "ik_ref": ObservationTermCfg(func=nero_reference_command),
         "joint_target_error": ObservationTermCfg(func=nero_joint_target_error),
-        "actions": ObservationTermCfg(func=last_action),
+        "actions": ObservationTermCfg(func=nero_last_action),
       },
       concatenate_terms=True,
       enable_corruption=False,
@@ -376,6 +524,7 @@ def make_nero_mjlab_env_cfg(
     },
     commands={
       "ik_ref": NeroIkCommandCfg(
+        eef_file=str(as_abs(eef)),
         ik_file=str(as_abs(ik)),
         entity_name="robot",
         resampling_time_range=(1.0e9, 1.0e9),
@@ -383,7 +532,17 @@ def make_nero_mjlab_env_cfg(
         loop=loop_reference,
       ),
     },
-    rewards={},
+    rewards={
+      "tracking": RewardTermCfg(
+        func=nero_tcp_tracking_reward,
+        weight=1.0,
+        params={"asset_cfg": SceneEntityCfg("robot", site_names=("tcp",))},
+      ),
+      "action_smoothness": RewardTermCfg(
+        func=action_rate_l2,
+        weight=-0.01,
+      ),
+    },
     terminations={
       "time_out": TerminationTermCfg(func=time_out, time_out=True),
     },
@@ -415,6 +574,7 @@ def run_smoke(args: argparse.Namespace) -> None:
   log_stage("building env cfg")
   cfg = make_nero_mjlab_env_cfg(
     scene=args.scene,
+    eef=args.eef,
     ik=args.ik,
     num_envs=args.num_envs,
     episode_length_s=args.episode_length_s,
@@ -448,6 +608,7 @@ def run_scene_check(args: argparse.Namespace) -> None:
   log_stage("building env cfg")
   cfg = make_nero_mjlab_env_cfg(
     scene=args.scene,
+    eef=args.eef,
     ik=args.ik,
     num_envs=args.num_envs,
     episode_length_s=args.episode_length_s,
@@ -474,8 +635,9 @@ def main() -> None:
     default="scene",
     help="scene compiles the mjlab MjSpec only; env instantiates MuJoCo Warp and steps.",
   )
-  parser.add_argument("--scene", default="outputs/mujoco_nero_scene/scene.xml")
-  parser.add_argument("--ik", default="outputs/ego_nero_easy/nero_eef_ik/nero_eef_ik.npz")
+  parser.add_argument("--scene", default=DEFAULT_SCENE_PATH)
+  parser.add_argument("--eef", default=DEFAULT_EEF_PATH)
+  parser.add_argument("--ik", default=DEFAULT_MINK_IK_PATH)
   parser.add_argument("--num-envs", type=int, default=1)
   parser.add_argument("--device", default="cuda:0")
   parser.add_argument("--steps", type=int, default=4)

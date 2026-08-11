@@ -8,6 +8,7 @@ from mjlab.tasks.registry import list_tasks, register_mjlab_task
 
 
 TASK_ID = "Mjlab-Nero-IK-Residual"
+PICK_PLACE_TASK_ID = "Mjlab-Nero-PickPlace-IK-Residual"
 
 
 def nero_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
@@ -51,22 +52,52 @@ def nero_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
 
 def register_nero_mjlab_task() -> None:
   if TASK_ID in list_tasks():
-    return
-  register_mjlab_task(
-    task_id=TASK_ID,
-    env_cfg=make_nero_mjlab_env_cfg(
-      num_envs=1024,
-      sampling_mode="uniform",
-      loop_reference=True,
-    ),
-    play_env_cfg=make_nero_mjlab_env_cfg(
-      num_envs=1,
-      sampling_mode="start",
-      loop_reference=True,
-    ),
-    rl_cfg=nero_ppo_runner_cfg(),
-    runner_cls=None,
-  )
+    pass
+  else:
+    register_mjlab_task(
+      task_id=TASK_ID,
+      env_cfg=make_nero_mjlab_env_cfg(
+        num_envs=1024,
+        sampling_mode="uniform",
+        loop_reference=True,
+      ),
+      play_env_cfg=make_nero_mjlab_env_cfg(
+        num_envs=1,
+        sampling_mode="start",
+        loop_reference=True,
+      ),
+      rl_cfg=nero_ppo_runner_cfg(),
+      runner_cls=None,
+    )
+
+  if PICK_PLACE_TASK_ID not in list_tasks():
+    register_mjlab_task(
+      task_id=PICK_PLACE_TASK_ID,
+      env_cfg=make_nero_mjlab_env_cfg(
+        scene="outputs/nero_pick_place_human/mujoco_nero_scene_rl_example/scene.xml",
+        eef=(
+          "outputs/nero_pick_place_human/robot_eef_scene_camera_rl_example/"
+          "robot_eef_trajectory.json"
+        ),
+        ik="outputs/nero_pick_place_human/nero_eef_ik_rl_example/nero_eef_ik.npz",
+        num_envs=1024,
+        sampling_mode="uniform",
+        loop_reference=True,
+      ),
+      play_env_cfg=make_nero_mjlab_env_cfg(
+        scene="outputs/nero_pick_place_human/mujoco_nero_scene_rl_example/scene.xml",
+        eef=(
+          "outputs/nero_pick_place_human/robot_eef_scene_camera_rl_example/"
+          "robot_eef_trajectory.json"
+        ),
+        ik="outputs/nero_pick_place_human/nero_eef_ik_rl_example/nero_eef_ik.npz",
+        num_envs=1,
+        sampling_mode="start",
+        loop_reference=True,
+      ),
+      rl_cfg=nero_ppo_runner_cfg(),
+      runner_cls=None,
+    )
 
 
 register_nero_mjlab_task()

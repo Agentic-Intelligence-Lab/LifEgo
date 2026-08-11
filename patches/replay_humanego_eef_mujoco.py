@@ -27,6 +27,10 @@ def load_runtime(viewer: bool, gl_backend: str) -> None:
 
     import cv2 as cv2_module
     import mujoco as mujoco_module
+    if not hasattr(mujoco_module, "Renderer"):
+        from mujoco.rendering.classic.renderer import Renderer
+
+        mujoco_module.Renderer = Renderer
 
     if viewer:
         import mujoco.viewer  # noqa: F401

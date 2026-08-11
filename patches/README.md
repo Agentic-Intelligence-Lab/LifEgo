@@ -311,6 +311,7 @@ RL 环境骨架：
 # mjlab 版（当前推荐）：只编译 mjlab scene，不启动 MuJoCo Warp
 $PY patches/nero_mjlab_env.py \
   --scene outputs/mujoco_nero_scene/scene.xml \
+  --eef outputs/ego_nero_easy/robot_eef_scene_camera_axis_corrected/robot_eef_trajectory.json \
   --ik outputs/ego_nero_easy/nero_eef_ik/nero_eef_ik.npz
 
 # mjlab 官方 play：dummy policy + Viser 浏览器 viewer
@@ -331,13 +332,15 @@ $PY patches/nero_mjlab_env.py \
   --device cuda:0 \
   --num-envs 16 \
   --scene outputs/mujoco_nero_scene/scene.xml \
+  --eef outputs/ego_nero_easy/robot_eef_scene_camera_axis_corrected/robot_eef_trajectory.json \
   --ik outputs/ego_nero_easy/nero_eef_ik/nero_eef_ik.npz
 ```
 
 说明：
 
 - 当前骨架把动作定义成 8 维 residual：7 轴关节 + 1 个夹爪开口残差。
-- reward 现在留空；后续把 object tracking / contact / smoothness 填进去即可。
+- reference command 同时加载轴校正后的 HumanEgo EEF JSON 和 mink IK `.npz`；policy 的 offset 基于 IK 初值施加。
+- 当前 reward 先包含两项：`tracking`（TCP 跟踪 HumanEgo EEF）和 `action_smoothness`（动作差分 L2 惩罚）。
 
 仅真机：
 
