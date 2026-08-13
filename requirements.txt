@@ -49,6 +49,10 @@ roma>=1.4
 pyquaternion>=0.9
 smplx>=0.1.28
 
+# ── Simulation (Nero MuJoCo pipeline: patches/build_nero_mujoco_scene.py,
+#    solve_nero_eef_ik.py, replay_*_mujoco.py, compare_realbot_humanego_eef.py) ──
+mujoco>=3.0
+
 # ── Project Aria & Robot Hardware ──
 # NOTE: projectaria-client-sdk 1.1.0 hard-pins projectaria-tools==1.5.2a1, but the
 # pipeline needs 1.7.1 — setup.sh installs both with --no-deps, so pip prints a

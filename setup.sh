@@ -289,6 +289,10 @@ check_import "smplx"                 "import smplx"
 check_import "chumpy"                "import chumpy"
 check_import "pyrender"              "import pyrender"
 
+echo ""
+info "=== Simulation ==="
+check_import "mujoco"                "import mujoco"
+
 if [ "$SKIP_HARDWARE" != "1" ]; then
     echo ""
     info "=== Hardware ==="
