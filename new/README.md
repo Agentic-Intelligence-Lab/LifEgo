@@ -72,11 +72,10 @@ The current pipeline covers:
 
 1. RGB video to WiLoR hand reconstruction.
 2. WiLoR hand geometry to robot EEF targets.
-3. MuJoCo replay for EEF markers, IK results, and real-bot comparison.
-4. Shared calibrated assets and fixed MuJoCo scenes.
-
-RL training code is still in `patches/` and uses the EEF/IK outputs produced by
-this pipeline.
+3. EEF retargeting to Nero joint IK.
+4. MuJoCo replay for EEF markers, IK results, and real-bot comparison.
+5. mjlab residual-control RL on top of the mink IK trajectory.
+6. Shared calibrated assets and fixed MuJoCo scenes.
 
 ## Files
 
@@ -114,6 +113,22 @@ cleaned version of the old IK script and is kept as a baseline/reference solver.
 : Solves the same IK retargeting problem with mink. It writes the same `.npz`
 schema as the SciPy solver. Use this as the default retargeter for the RL
 pipeline.
+
+`rl_env_mjlab.py`
+: Defines the mjlab residual-control environment, registers
+`Mjlab-Nero-IK-Residual`, and stores its PPO config. The action is an offset on
+top of the mink IK joint trajectory plus a gripper-width offset.
+
+`rl_train_mjlab.py`
+: Training entry point. It registers the Nero task, then calls mjlab's train
+script.
+
+`rl_play_mjlab.py`
+: Playback/viewer entry point. Run this only from a local graphics session, not
+from SSH.
+
+`rl_eval_mjlab.py`
+: Headless checkpoint evaluation for zero policy or trained policies.
 
 `replay_eef_mujoco.py`
 : Shows only exported EEF target markers in the fixed single-arm scene. The
@@ -170,6 +185,43 @@ Retarget EEF targets with SciPy baseline:
 /home/ymq/miniconda3/envs/lifego/bin/python new/retarget_with_scipy.py
 ```
 
+Check the mjlab RL scene:
+
+```bash
+/home/ymq/miniconda3/envs/lifego/bin/python new/rl_env_mjlab.py --check scene
+```
+
+Train the mjlab residual policy:
+
+```bash
+/home/ymq/miniconda3/envs/lifego/bin/python new/rl_train_mjlab.py \
+  Mjlab-Nero-IK-Residual \
+  --agent.max-iterations 500 \
+  --agent.logger tensorboard \
+  --agent.upload-model False \
+  --log-root outputs/new_pipeline/ego_nero_easy/rl_logs
+```
+
+Evaluate checkpoints headlessly:
+
+```bash
+/home/ymq/miniconda3/envs/lifego/bin/python new/rl_eval_mjlab.py \
+  Mjlab-Nero-IK-Residual \
+  --include-zero \
+  --steps 240 \
+  --num-envs 1024 \
+  --out outputs/new_pipeline/ego_nero_easy/rl_logs/eval.json
+```
+
+Open the mjlab viewer from a local graphics session:
+
+```bash
+/home/ymq/miniconda3/envs/lifego/bin/python new/rl_play_mjlab.py \
+  Mjlab-Nero-IK-Residual \
+  --agent zero \
+  --viewer native
+```
+
 Replay EEF markers only:
 
 ```bash
@@ -193,6 +245,7 @@ Replay real-bot data with optional IK comparison:
 ```
 
 Without `--viewer`, replay scripts render MP4 files instead of opening a window.
+Do not start viewer commands from an SSH session.
 
 ## Retarget Solver Choice
 
@@ -252,4 +305,24 @@ grasp
 gripper_width_m
 pos_err_m
 ang_err_deg
+```
+
+RL defaults:
+
+```text
+task: Mjlab-Nero-IK-Residual
+scene: new/assets/mujoco_nero_scene/scene.xml
+eef: outputs/new_pipeline/ego_nero_easy/robot_eef_scene_camera_axis_corrected/robot_eef_trajectory.json
+ik: outputs/new_pipeline/ego_nero_easy/nero_eef_ik/nero_eef_ik.npz
+```
+
+RL observation/action/reward:
+
+```text
+action: 8D residual = 7 arm joint offsets + 1 gripper width offset
+actor obs: 52D = joint pos 9 + joint vel 9 + IK reference 17 + joint target error 9 + last action 8
+critic obs: same as actor
+reward tracking: site:tcp position/orientation tracking, weight 1.0
+reward action_smoothness: action_rate_l2, weight -0.01
+termination: timeout
 ```
