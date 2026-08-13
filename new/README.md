@@ -1,5 +1,68 @@
 # LifEgo New Pipeline
 
+默认在仓库根目录执行。文档中以 `ego_nero_easy` 为例；也可用 `nero_pick_place` 等同名 session（见文末）。
+
+```bash
+cd LifEgo
+PY=/home/ymq/miniconda3/envs/lifego/bin/python
+```
+
+## 安装（首次）
+
+```bash
+PREDOWNLOAD=0 SKIP_HAND=0 SKIP_HARDWARE=1 bash setup.sh
+```
+
+WiLoR 需要 PyTorch 动态库时：
+
+```bash
+export LD_LIBRARY_PATH=$(
+  $PY -c "import torch, os; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))"
+):$LD_LIBRARY_PATH
+```
+
+默认 WiLoR 权重：`.cache/wilor_mini`。
+
+依赖本机 URDF（建场景时）：
+
+```text
+/home/ymq/code/agx_arm_urdf/nero
+```
+
+## 坐标系与 grasp（必读）
+
+仿真 **`site:tcp`（tool-centric）**：
+
+```text
+R_tcp = R_flange
+p_tcp = p_flange + R_flange @ [0.13, 0, 0]    # link7 +X，朝夹爪尖端
+```
+
+与法兰、尖端在同一条线上。IK 跟踪的是该帧，**不是** JSONL 里控制器旧定义  
+`p = flange + R @ [0, 0, 0.13]`（法兰 +Z）。
+
+HumanEgo IK 输入使用**轴校正后**的 EEF：
+
+```text
+outputs/<session>/robot_eef_scene_camera_axis_corrected/robot_eef_trajectory.json
+```
+
+该 JSON 每帧含：
+
+| 字段 | 含义 |
+|--|--|
+| `T_ee_in_base` | EEF 在 robot base 下的 4×4 |
+| `grasp` | **二元**夹爪状态：`0`=开，`1`=闭（WiLoR 拇指–食指距离比） |
+
+IK 将 `grasp` 映射为夹爪开口宽：
+
+| grasp | 默认宽度 | 参数 |
+|--|--|--|
+| 0 开 | `0.1 m` | `--gripper-open-m` |
+| 1 闭 | `0.0 m` | `--gripper-closed-m` |
+
+---
+
 This directory contains the cleaned Nero pipeline code. New work should stay
 here unless an old `patches/` entry point must be kept for compatibility.
 

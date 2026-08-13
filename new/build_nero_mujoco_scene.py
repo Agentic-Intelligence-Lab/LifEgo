@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import os
 import shutil
@@ -13,11 +12,15 @@ from pathlib import Path
 
 import numpy as np
 
-from assets import DEFAULT_ASSETS
+from assets import DEFAULT_ASSETS, MUJOCO_NERO_SCENE
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-URDF_ROOT = Path(os.environ.get("AGX_ARM_URDF_ROOT", str(REPO_ROOT / "thirdparty" / "agx_arm_urdf")))
-NERO_ROOT = URDF_ROOT / "nero"
+URDF_ROOT_CANDIDATES = [
+    DEFAULT_ASSETS.platform.urdf_root,
+    os.environ.get("AGX_ARM_URDF_ROOT"),
+    "./thirdparty/agx_arm_urdf",
+    str(REPO_ROOT / "thirdparty" / "agx_arm_urdf"),
+]
 
 LINK_COLORS = {
     "base_link": "0.18 0.18 0.20 1",
@@ -44,10 +47,34 @@ ZERO_QPOS = {
     "joint7": 0.0,
 }
 
+DEFAULT_TABLE_CENTER_M = np.array([-0.25, 0.0, -0.025], dtype=np.float64)
+DEFAULT_TABLE_HALF_SIZE_M = np.array([0.75, 0.65, 0.025], dtype=np.float64)
+DEFAULT_WORKSPACE_CENTER_M = np.array([-0.35, -0.25, 0.0], dtype=np.float64)
+DEFAULT_WORKSPACE_HALF_SIZE_M = np.array([0.30, 0.24, 0.002], dtype=np.float64)
+
 
 def as_abs(path: str | Path) -> Path:
     path = Path(path)
     return path if path.is_absolute() else REPO_ROOT / path
+
+
+def resolve_urdf_root() -> Path:
+    tried = []
+    for candidate in URDF_ROOT_CANDIDATES:
+        if not candidate:
+            continue
+        root = as_abs(candidate)
+        tried.append(str(root))
+        if (root / "nero" / "urdf" / "nero_description.urdf").is_file():
+            return root
+    raise FileNotFoundError(
+        "Could not find Nero URDF root. Set DEFAULT_ASSETS.platform.urdf_root "
+        "or AGX_ARM_URDF_ROOT. Tried: " + ", ".join(tried)
+    )
+
+
+def nero_root() -> Path:
+    return resolve_urdf_root() / "nero"
 
 
 def parse_vec(text: str | None, default: str = "0 0 0") -> list[float]:
@@ -56,6 +83,49 @@ def parse_vec(text: str | None, default: str = "0 0 0") -> list[float]:
 
 def fmt(values) -> str:
     return " ".join(f"{float(v):.9g}" for v in values)
+
+
+def assets_platform():
+    return DEFAULT_ASSETS.platform
+
+
+def table_center_m() -> np.ndarray:
+    platform = assets_platform()
+    if platform.table_point_m is None:
+        return DEFAULT_TABLE_CENTER_M.copy()
+    p = np.asarray(platform.table_point_m, dtype=np.float64).copy()
+    return p + np.array([-0.25, 0.0, -0.025], dtype=np.float64)
+
+
+def table_half_size_m() -> np.ndarray:
+    return DEFAULT_TABLE_HALF_SIZE_M.copy()
+
+
+def workspace_center_m() -> np.ndarray:
+    platform = assets_platform()
+    if platform.workspace_center_m is None:
+        return DEFAULT_WORKSPACE_CENTER_M.copy()
+    return np.asarray(platform.workspace_center_m, dtype=np.float64).copy()
+
+
+def workspace_half_size_m() -> np.ndarray:
+    platform = assets_platform()
+    if platform.workspace_half_size_m is None:
+        return DEFAULT_WORKSPACE_HALF_SIZE_M.copy()
+    size = np.asarray(platform.workspace_half_size_m, dtype=np.float64).copy()
+    if size.shape != (3,):
+        raise ValueError("DEFAULT_ASSETS.platform.workspace_half_size_m must be a 3-vector")
+    return size
+
+
+def tcp_offset_m() -> np.ndarray:
+    offset = assets_platform().tcp.t_flange_m
+    if offset is None:
+        return np.array([0.13, 0.0, 0.0], dtype=np.float64)
+    offset = np.asarray(offset, dtype=np.float64)
+    if offset.shape != (3,):
+        raise ValueError("DEFAULT_ASSETS.platform.tcp.t_flange_m must be a 3-vector")
+    return offset
 
 
 def rpy_to_quat(rpy: list[float]) -> list[float]:
@@ -70,39 +140,6 @@ def rpy_to_quat(rpy: list[float]) -> list[float]:
         sy * cp * sr + cy * sp * cr,
         sy * cp * cr - cy * sp * sr,
     ]
-
-
-def matrix_to_quat(R: np.ndarray) -> list[float]:
-    tr = np.trace(R)
-    if tr > 0:
-        s = math.sqrt(tr + 1.0) * 2.0
-        w = 0.25 * s
-        x = (R[2, 1] - R[1, 2]) / s
-        y = (R[0, 2] - R[2, 0]) / s
-        z = (R[1, 0] - R[0, 1]) / s
-    else:
-        i = int(np.argmax(np.diag(R)))
-        if i == 0:
-            s = math.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2]) * 2.0
-            w = (R[2, 1] - R[1, 2]) / s
-            x = 0.25 * s
-            y = (R[0, 1] + R[1, 0]) / s
-            z = (R[0, 2] + R[2, 0]) / s
-        elif i == 1:
-            s = math.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2]) * 2.0
-            w = (R[0, 2] - R[2, 0]) / s
-            x = (R[0, 1] + R[1, 0]) / s
-            y = 0.25 * s
-            z = (R[1, 2] + R[2, 1]) / s
-        else:
-            s = math.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1]) * 2.0
-            w = (R[1, 0] - R[0, 1]) / s
-            x = (R[0, 2] + R[2, 0]) / s
-            y = (R[1, 2] + R[2, 1]) / s
-            z = 0.25 * s
-    q = np.array([w, x, y, z], dtype=np.float64)
-    q /= np.linalg.norm(q)
-    return q.tolist()
 
 
 def indent(elem: ET.Element, level: int = 0) -> None:
@@ -123,11 +160,12 @@ def mesh_name_from_link(link: str) -> str:
 
 
 def load_urdf_model() -> tuple[dict, dict, dict[str, list[dict]]]:
-    base_tree = ET.parse(NERO_ROOT / "urdf" / "nero_description.urdf")
+    root_dir = nero_root()
+    base_tree = ET.parse(root_dir / "urdf" / "nero_description.urdf")
     root = base_tree.getroot()
-    flange_tree = ET.parse(NERO_ROOT / "urdf" / "nero_with_gripper_flange_description.xacro")
+    flange_tree = ET.parse(root_dir / "urdf" / "nero_with_gripper_flange_description.xacro")
     flange_root = flange_tree.getroot()
-    gripper_tree = ET.parse(NERO_ROOT / "urdf" / "nero_with_gripper_description.xacro")
+    gripper_tree = ET.parse(root_dir / "urdf" / "nero_with_gripper_description.xacro")
     gripper_root = gripper_tree.getroot()
 
     links: dict[str, ET.Element] = {}
@@ -154,10 +192,11 @@ def load_urdf_model() -> tuple[dict, dict, dict[str, list[dict]]]:
 
 
 def copy_meshes(out_dir: Path, links: dict[str, ET.Element]) -> None:
+    root_dir = nero_root()
     mesh_dir = out_dir / "meshes"
     mesh_dir.mkdir(parents=True, exist_ok=True)
     for link in links:
-        src = NERO_ROOT / "meshes" / f"{link}.stl"
+        src = root_dir / "meshes" / f"{link}.stl"
         if src.is_file():
             shutil.copy2(src, mesh_dir / src.name)
 
@@ -193,7 +232,7 @@ def add_inertial(body: ET.Element, link_node: ET.Element) -> None:
 
 
 def add_link_geom(body: ET.Element, link: str) -> None:
-    if not (NERO_ROOT / "meshes" / f"{link}.stl").is_file():
+    if not (nero_root() / "meshes" / f"{link}.stl").is_file():
         return
     ET.SubElement(
         body,
@@ -230,7 +269,7 @@ def add_body_recursive(parent_body: ET.Element, link: str, links: dict, children
             "site",
             {
                 "name": "tcp",
-                "pos": "0.13 0 0",
+                "pos": fmt(tcp_offset_m()),
                 "size": "0.020",
                 "rgba": "0.95 0.15 0.85 1",
             },
@@ -311,53 +350,38 @@ def add_axis(worldbody: ET.Element) -> None:
 
 def add_camera_setup(
     worldbody: ET.Element,
-    camera_y: float,
-    camera_height: float,
-    camera_source: str = "assets",
 ) -> None:
-    """Place the ego_camera in the scene.
-
-    camera_source="assets" (default) uses the calibrated T_cam_in_base (and, for
-    fovy, the intrinsics fy/height) from patches/assets.py DEFAULT_ASSETS.
-    camera_source="soft" falls back to the fixed 45deg-pitch/camera_y/camera_height
-    approximation, for setups without a calibration yet.
-    """
+    """Place the calibrated scene camera from DEFAULT_ASSETS."""
     cam_asset = DEFAULT_ASSETS.camera()
-    if camera_source == "assets" and cam_asset is not None and cam_asset.extrinsics.is_filled():
-        T_cam_in_base = cam_asset.extrinsics.T_cam_in_base
-        camera_pos = T_cam_in_base[:3, 3].copy()
-        R_cam_in_base = T_cam_in_base[:3, :3]
-        # T_cam_in_base columns are the OpenCV camera axes (x-right, y-down,
-        # z-forward) expressed in base; MuJoCo cameras look down local -z with
-        # +y up, so flip y (and z falls out via MuJoCo's internal x-cross-y).
-        x_axis = R_cam_in_base[:, 0].copy()
-        y_axis = -R_cam_in_base[:, 1].copy()
-        z_forward = R_cam_in_base[:, 2].copy()
-        if abs(z_forward[2]) > 1e-9:
-            t = -camera_pos[2] / z_forward[2]
-            target = camera_pos + t * z_forward
-        else:
-            target = camera_pos + z_forward
-        cam_name = "ego_camera_calibrated"
-        fovy = 70.0
-        intr = cam_asset.intrinsics
-        if intr.is_filled() and intr.height:
-            fovy = math.degrees(2.0 * math.atan((intr.height * 0.5) / intr.fy))
+    if cam_asset is None or not cam_asset.extrinsics.is_filled():
+        raise ValueError("DEFAULT_ASSETS.camera().extrinsics.T_cam_in_base must be filled")
+
+    T_cam_in_base = np.asarray(cam_asset.extrinsics.T_cam_in_base, dtype=np.float64)
+    camera_pos = T_cam_in_base[:3, 3].copy()
+    R_cam_in_base = T_cam_in_base[:3, :3]
+    # T_cam_in_base columns are OpenCV camera axes in base: +x image-right,
+    # +y image-down, +z optical forward. MuJoCo cameras use local -z forward
+    # and +y up, so the MuJoCo xyaxes are OpenCV +x and -y.
+    x_axis = R_cam_in_base[:, 0].copy()
+    y_axis = -R_cam_in_base[:, 1].copy()
+    z_forward = R_cam_in_base[:, 2].copy()
+    table_z = float(table_center_m()[2] + table_half_size_m()[2])
+    if abs(z_forward[2]) > 1e-9:
+        t = (table_z - camera_pos[2]) / z_forward[2]
+        target = camera_pos + t * z_forward
     else:
-        camera_pos = np.array([0.0, camera_y, camera_height], dtype=np.float64)
-        target = np.array([-camera_height, camera_y, 0.0], dtype=np.float64)
-        x_axis = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-        z_axis = np.array([math.sqrt(0.5), 0.0, math.sqrt(0.5)], dtype=np.float64)
-        y_axis = np.cross(z_axis, x_axis)
-        y_axis /= np.linalg.norm(y_axis)
-        cam_name = "ego_camera_45deg_585mm"
-        fovy = 70.0
+        target = camera_pos + z_forward
+
+    fovy = 70.0
+    intr = cam_asset.intrinsics
+    if intr.is_filled() and intr.height and intr.fy:
+        fovy = math.degrees(2.0 * math.atan((intr.height * 0.5) / intr.fy))
 
     ET.SubElement(
         worldbody,
         "camera",
         {
-            "name": cam_name,
+            "name": "ego_camera_calibrated",
             "pos": fmt(camera_pos),
             "xyaxes": fmt(list(x_axis) + list(y_axis)),
             "fovy": f"{fovy:.3f}",
@@ -370,229 +394,25 @@ def add_camera_setup(
     ET.SubElement(worldbody, "site", {"name": "camera_table_intersection", "pos": fmt(target), "size": "0.018", "rgba": "0.1 0.35 1 1"})
 
 
-def load_real_flange_points(path: Path | None) -> list[list[float]]:
-    if path is None:
-        return []
-    if not path.is_file():
-        return []
-    pts = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        rec = json.loads(line)
-        if rec.get("kind") == "sample":
-            pts.append(rec["poses"]["flange_pose"][:3])
-    return pts
-
-
-def load_real_flange_poses(path: Path | None) -> list[tuple[list[float], list[float]]]:
-    if path is None:
-        return []
-    if not path.is_file():
-        return []
-    poses = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        rec = json.loads(line)
-        if rec.get("kind") == "sample":
-            pose = rec["poses"]["flange_pose"]
-            poses.append((pose[:3], rpy_to_quat(pose[3:6])))
-    return poses
-
-
-def load_humanego_points(path: Path) -> list[list[float]]:
-    if not path.is_file():
-        return []
-    data = json.loads(path.read_text(encoding="utf-8"))
-    pts = []
-    for rec in data.get("records", []):
-        if rec.get("valid"):
-            pts.append(rec["T_ee_in_base"]["translation_m"])
-    return pts
-
-
-def load_humanego_poses(path: Path) -> list[tuple[list[float], list[float]]]:
-    if not path.is_file():
-        return []
-    data = json.loads(path.read_text(encoding="utf-8"))
-    poses = []
-    for rec in data.get("records", []):
-        if rec.get("valid"):
-            T = np.array(rec["T_ee_in_base"]["T"], dtype=np.float64)
-            poses.append((T[:3, 3].tolist(), matrix_to_quat(T[:3, :3])))
-    return poses
-
-
-def load_first_humanego_pose(path: Path) -> tuple[list[float], list[float]] | None:
-    if not path.is_file():
-        return None
-    data = json.loads(path.read_text(encoding="utf-8"))
-    for rec in data.get("records", []):
-        if rec.get("valid"):
-            T = np.array(rec["T_ee_in_base"]["T"], dtype=np.float64)
-            return T[:3, 3].tolist(), matrix_to_quat(T[:3, :3])
-    return None
-
-
-def add_path_points(worldbody: ET.Element, name: str, pts: list[list[float]], rgba: str, every: int) -> None:
-    for i, p in enumerate(pts):
-        if i % every != 0 and i != len(pts) - 1:
-            continue
-        ET.SubElement(
-            worldbody,
-            "site",
-            {
-                "name": f"{name}_{i:03d}",
-                "pos": fmt(p),
-                "size": "0.008",
-                "rgba": rgba,
-            },
-        )
-
-
-def add_endpoint_sites(worldbody: ET.Element, name: str, pts: list[list[float]], start_rgba: str, end_rgba: str) -> None:
-    if not pts:
-        return
-    ET.SubElement(
-        worldbody,
-        "site",
-        {
-            "name": f"{name}_start",
-            "pos": fmt(pts[0]),
-            "size": "0.022",
-            "rgba": start_rgba,
-        },
-    )
-    ET.SubElement(
-        worldbody,
-        "site",
-        {
-            "name": f"{name}_end",
-            "pos": fmt(pts[-1]),
-            "size": "0.022",
-            "rgba": end_rgba,
-        },
-    )
-
-
-def add_pose_frame_body(
-    worldbody: ET.Element,
-    name: str,
-    pos: list[float],
-    quat: list[float],
-    origin_rgba: str,
-    length: float,
-    radius: float,
-) -> None:
-    body = ET.SubElement(
-        worldbody,
-        "body",
-        {
-            "name": name,
-            "pos": fmt(pos),
-            "quat": fmt(quat),
-        },
-    )
-    ET.SubElement(body, "geom", {"name": f"{name}_origin", "type": "sphere", "size": fmt([radius * 2.0]), "rgba": origin_rgba, "contype": "0", "conaffinity": "0"})
-    ET.SubElement(body, "geom", {"name": f"{name}_x", "type": "capsule", "fromto": fmt([0, 0, 0, length, 0, 0]), "size": fmt([radius]), "rgba": "1 0.05 0.05 0.9", "contype": "0", "conaffinity": "0"})
-    ET.SubElement(body, "geom", {"name": f"{name}_y", "type": "capsule", "fromto": fmt([0, 0, 0, 0, length, 0]), "size": fmt([radius]), "rgba": "0.05 0.8 0.1 0.9", "contype": "0", "conaffinity": "0"})
-    ET.SubElement(body, "geom", {"name": f"{name}_z", "type": "capsule", "fromto": fmt([0, 0, 0, 0, 0, length]), "size": fmt([radius]), "rgba": "0.1 0.3 1 0.9", "contype": "0", "conaffinity": "0"})
-
-
-def add_pose_frames(
-    worldbody: ET.Element,
-    name: str,
-    poses: list[tuple[list[float], list[float]]],
-    origin_rgba: str,
-    every: int,
-    length: float = 0.055,
-    radius: float = 0.0035,
-) -> None:
-    for i, (pos, quat) in enumerate(poses):
-        if i % every != 0 and i != len(poses) - 1:
-            continue
-        add_pose_frame_body(worldbody, f"{name}_{i:03d}", pos, quat, origin_rgba, length, radius)
-
-
-def add_frame_legend_markers(worldbody: ET.Element) -> None:
-    """Mocap bodies for flange / controller TCP / gripper tip (color legend in replay)."""
-    specs = [
-        ("vis_flange_marker", "0.15 0.95 0.25 1"),
-        ("vis_tcp_marker", "0.95 0.15 0.85 1"),
-        ("vis_tip_marker", "1 0.55 0.05 1"),
-    ]
-    for i, (name, rgba) in enumerate(specs):
-        marker = ET.SubElement(
-            worldbody,
-            "body",
-            {
-                "name": name,
-                "mocap": "true",
-                "pos": f"0 {0.05 * (i - 1):.2f} 0.20",
-                "quat": "1 0 0 0",
-            },
-        )
-        ET.SubElement(
-            marker,
-            "geom",
-            {
-                "name": f"{name}_origin",
-                "type": "sphere",
-                "size": "0.016",
-                "rgba": rgba,
-                "contype": "0",
-                "conaffinity": "0",
-            },
-        )
-        for axis, fromto, axis_rgba in (
-            ("x", "0 0 0 0.07 0 0", "1 0.15 0.15 1"),
-            ("y", "0 0 0 0 0.07 0", "0.15 0.9 0.15 1"),
-            ("z", "0 0 0 0 0 0.07", "0.15 0.35 1 1"),
-        ):
-            ET.SubElement(
-                marker,
-                "geom",
-                {
-                    "name": f"{name}_{axis}",
-                    "type": "capsule",
-                    "fromto": fromto,
-                    "size": "0.0045",
-                    "rgba": axis_rgba,
-                    "contype": "0",
-                    "conaffinity": "0",
-                },
-            )
-
-
-def add_humanego_eef_marker(worldbody: ET.Element, humanego_eef_path: Path) -> None:
-    pose = load_first_humanego_pose(humanego_eef_path)
-    pos, quat = pose if pose is not None else ([0.0, 0.0, 0.2], [1.0, 0.0, 0.0, 0.0])
+def add_humanego_eef_marker(worldbody: ET.Element) -> None:
     marker = ET.SubElement(
         worldbody,
         "body",
         {
             "name": "humanego_eef_marker",
             "mocap": "true",
-            "pos": fmt(pos),
-            "quat": fmt(quat),
+            "pos": "0 0 0.2",
+            "quat": "1 0 0 0",
         },
     )
     ET.SubElement(marker, "geom", {"name": "humanego_eef_origin", "type": "sphere", "size": "0.018", "rgba": "0.05 0.75 1 1", "contype": "0", "conaffinity": "0"})
     ET.SubElement(marker, "geom", {"name": "humanego_eef_x_axis", "type": "capsule", "fromto": "0 0 0 0.075 0 0", "size": "0.005", "rgba": "1 0.05 0.05 1", "contype": "0", "conaffinity": "0"})
     ET.SubElement(marker, "geom", {"name": "humanego_eef_y_axis", "type": "capsule", "fromto": "0 0 0 0 0.075 0", "size": "0.005", "rgba": "0.05 0.8 0.1 1", "contype": "0", "conaffinity": "0"})
     ET.SubElement(marker, "geom", {"name": "humanego_eef_z_axis", "type": "capsule", "fromto": "0 0 0 0 0 0.075", "size": "0.005", "rgba": "0.1 0.3 1 1", "contype": "0", "conaffinity": "0"})
-    add_frame_legend_markers(worldbody)
 
 
 def build_scene(
     out_dir: Path,
-    include_trajectories: bool,
-    camera_y: float,
-    camera_height: float,
-    camera_source: str,
-    humanego_eef_path: Path,
-    realbot_path: Path | None,
-    real_path_every: int,
-    humanego_path_every: int,
-    real_frame_every: int,
-    humanego_frame_every: int,
 ) -> Path:
     links, _joints, children = load_urdf_model()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -619,24 +439,16 @@ def build_scene(
 
     worldbody = ET.SubElement(root, "worldbody")
     ET.SubElement(worldbody, "light", {"name": "key_light", "pos": "-0.6 -0.8 1.2", "dir": "0.4 0.5 -1", "diffuse": "0.8 0.8 0.8"})
-    ET.SubElement(worldbody, "geom", {"name": "table_top_z0", "type": "box", "pos": "-0.25 0  -0.025", "size": "0.75 0.65 0.025", "material": "table_mat"})
-    ET.SubElement(worldbody, "geom", {"name": "left_front_workspace_patch", "type": "box", "pos": "-0.35 -0.25 0.002", "size": "0.30 0.24 0.002", "material": "workspace_mat", "contype": "0", "conaffinity": "0"})
+    ET.SubElement(worldbody, "geom", {"name": "table_top_z0", "type": "box", "pos": fmt(table_center_m()), "size": fmt(table_half_size_m()), "material": "table_mat"})
+    workspace_pos = workspace_center_m().copy()
+    workspace_pos[2] = table_center_m()[2] + table_half_size_m()[2] + workspace_half_size_m()[2]
+    ET.SubElement(worldbody, "geom", {"name": "left_front_workspace_patch", "type": "box", "pos": fmt(workspace_pos), "size": fmt(workspace_half_size_m()), "material": "workspace_mat", "contype": "0", "conaffinity": "0"})
     add_axis(worldbody)
-    add_camera_setup(worldbody, camera_y=camera_y, camera_height=camera_height, camera_source=camera_source)
+    add_camera_setup(worldbody)
 
     base_body = ET.SubElement(worldbody, "body", {"name": "base_link", "pos": "0 0 0", "quat": "1 0 0 0"})
     add_body_recursive(base_body, "base_link", links, children)
-    add_humanego_eef_marker(worldbody, humanego_eef_path)
-
-    if include_trajectories:
-        real_points = load_real_flange_points(realbot_path)
-        humanego_points = load_humanego_points(humanego_eef_path)
-        add_path_points(worldbody, "real_flange_path", real_points, "1 0.65 0.05 0.75", every=real_path_every)
-        add_path_points(worldbody, "humanego_eef_path", humanego_points, "0.05 0.75 1 0.75", every=humanego_path_every)
-        add_endpoint_sites(worldbody, "real_flange", real_points, "1 0.25 0.05 1", "1 0.95 0.05 1")
-        add_endpoint_sites(worldbody, "humanego_eef", humanego_points, "0.0 1.0 1.0 1", "0.25 0.1 1.0 1")
-        add_pose_frames(worldbody, "real_flange_frame", load_real_flange_poses(realbot_path), "1 0.65 0.05 1", every=real_frame_every)
-        add_pose_frames(worldbody, "humanego_eef_frame", load_humanego_poses(humanego_eef_path), "0.05 0.75 1 1", every=humanego_frame_every)
+    add_humanego_eef_marker(worldbody)
 
     actuator = ET.SubElement(root, "actuator")
     for joint in ZERO_QPOS:
@@ -664,28 +476,12 @@ def build_scene(
 def write_readme(
     out_dir: Path,
     scene_path: Path,
-    camera_y: float,
-    camera_height: float,
-    camera_source: str,
-    humanego_eef_path: Path,
-    realbot_path: Path | None,
 ) -> None:
-    if camera_source == "assets" and DEFAULT_ASSETS.camera().extrinsics.is_filled():
-        p_cam = DEFAULT_ASSETS.camera().extrinsics.T_cam_in_base[:3, 3].tolist()
-        camera_desc = (
-            f"- Camera pose comes from the calibrated T_cam_in_base in `patches/assets.py` "
-            f"(DEFAULT_ASSETS), position `{p_cam}` m in robot base."
-        )
-    else:
-        camera_desc = (
-            f"- Camera is at `[0, {camera_y}, {camera_height}]` m, height `{camera_height}` m, "
-            "pitched down 45 deg (soft approximation, --camera-source soft).\n"
-            f"- Camera optical-axis table intersection is `[-{camera_height}, {camera_y}, 0]`, "
-            "so its table projection points along base `-x`."
-        )
+    camera = DEFAULT_ASSETS.camera()
+    p_cam = camera.extrinsics.T_cam_in_base[:3, 3].tolist()
     readme = f"""# Nero MuJoCo Scene
 
-Generated from `{NERO_ROOT}`.
+Generated from `{nero_root()}` using `new/assets.py`.
 
 Files:
 - `scene.xml`: MuJoCo MJCF scene.
@@ -696,28 +492,24 @@ Scene convention:
 - Base `+x` points backward, base `-x` is the front direction.
 - Base `+y` points to robot right, base `-y` points to robot left.
 - The highlighted yellow patch is the robot-left-front workspace (`x<0, y<0`).
-{camera_desc}
-
-Optional trajectory markers:
-- Yellow sites: real robot `flange_pose` samples from `{realbot_path}`.
-- Cyan sites: HumanEgo/WiLoR exported EE samples from `{humanego_eef_path}`.
-- Small RGB triads: sampled orientation frames for both trajectories. The origin color
-  distinguishes the source: yellow/orange for real flange, cyan for HumanEgo EEF.
-- Larger endpoint sites mark start/end: real start red-orange, real end yellow;
-  HumanEgo start cyan, HumanEgo end violet.
+- Camera pose comes from `DEFAULT_ASSETS.camera().extrinsics.T_cam_in_base`.
+- Camera position in robot base is `{p_cam}` m.
+- Camera FOV comes from `DEFAULT_ASSETS.camera().intrinsics`.
 
 Important frames:
 - `recorded_flange`: `link7` origin. This matches JSONL `poses.flange_pose`.
-- `tcp`: tool-centric TCP = `flange + 0.13 m` along flange/link7 +X (toward gripper tip).
+- `tcp`: tool-centric TCP = `DEFAULT_ASSETS.platform.tcp.t_flange_m` in flange/link7 frame.
   This differs from JSONL `poses.tcp_pose` which used `[0,0,0.13]` along flange +Z.
 - `gripper_tip`: approximate tip mid on `gripper_base` at `+0.175 Z` in gripper frame.
 - `jaw_parallel_flange`: the extra URDF `gripper_flange` fixed adapter after `link7`; it is offset
   from `recorded_flange` and has a different orientation (jaw +Z ≈ flange +X / base left).
-- `humanego_eef_marker`: a mocap body used by `patches/replay_humanego_eef_mujoco.py`
-  to show the moving HumanEgo/WiLoR EEF frame.
+- `humanego_eef_marker`: a mocap body used by `new/replay_eef_mujoco.py` and
+  `new/replay_ik_mujoco.py` to show the moving target EEF frame.
 - Full jaw-parallel gripper geometry is attached after `jaw_parallel_flange`.
 - `gripper_joint1` and `gripper_joint2` are controlled directly in MuJoCo; they mirror the
   URDF mimic pair with approximately half the recorded gripper width on each finger.
+- Static trajectories are intentionally not baked into the scene. Replay scripts draw
+  run-specific paths as viewer/render overlays.
 
 Load with MuJoCo after installing `mujoco` in an environment:
 
@@ -732,46 +524,14 @@ data = mujoco.MjData(model)
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out", default="outputs/mujoco_nero_scene")
-    parser.add_argument(
-        "--camera-source",
-        choices=["assets", "soft"],
-        default="assets",
-        help="'assets' (default) places the camera from the calibrated T_cam_in_base / "
-        "intrinsics in patches/assets.py (DEFAULT_ASSETS); 'soft' uses the fixed "
-        "45deg-pitch --camera-y/--camera-height approximation instead.",
-    )
-    parser.add_argument("--camera-y", type=float, default=-0.45)
-    parser.add_argument("--camera-height", type=float, default=0.585)
-    parser.add_argument(
-        "--humanego-eef",
-        default="outputs/ego_nero_easy/robot_eef_scene_camera_axis_corrected/robot_eef_trajectory.json",
-    )
-    parser.add_argument("--realbot", default="examples/ego_nero_easy_real_bot.jsonl")
-    parser.add_argument("--real-path-every", type=int, default=4)
-    parser.add_argument("--humanego-path-every", type=int, default=6)
-    parser.add_argument("--real-frame-every", type=int, default=8)
-    parser.add_argument("--humanego-frame-every", type=int, default=12)
-    parser.add_argument("--no-trajectories", action="store_true")
+    parser.add_argument("--out", default=str(MUJOCO_NERO_SCENE.parent))
     args = parser.parse_args()
 
     out_dir = as_abs(args.out)
-    humanego_eef_path = as_abs(args.humanego_eef)
-    realbot_path = None if args.realbot == "" else as_abs(args.realbot)
     scene_path = build_scene(
         out_dir=out_dir,
-        include_trajectories=not args.no_trajectories,
-        camera_y=args.camera_y,
-        camera_height=args.camera_height,
-        camera_source=args.camera_source,
-        humanego_eef_path=humanego_eef_path,
-        realbot_path=realbot_path,
-        real_path_every=args.real_path_every,
-        humanego_path_every=args.humanego_path_every,
-        real_frame_every=args.real_frame_every,
-        humanego_frame_every=args.humanego_frame_every,
     )
-    write_readme(out_dir, scene_path, args.camera_y, args.camera_height, args.camera_source, humanego_eef_path, realbot_path)
+    write_readme(out_dir, scene_path)
     print(f"Wrote {scene_path}")
     print(f"Wrote {out_dir / 'README.md'}")
 
