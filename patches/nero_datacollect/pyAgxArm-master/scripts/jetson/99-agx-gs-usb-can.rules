@@ -1,0 +1,2 @@
+# Agilex / candleLight USB-CAN：插入或枚举时自动激活
+ACTION=="add", SUBSYSTEM=="net", DRIVERS=="gs_usb", RUN+="/usr/local/sbin/agx-can-up.sh %k"

@@ -1,0 +1,14 @@
+[Unit]
+Description=Activate AgileX USB CAN (gs_usb) at boot
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/bin/sleep 5
+ExecStart=/usr/local/sbin/agx-can-up.sh
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

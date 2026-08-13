@@ -3,3 +3,11 @@ outputs/
 examples/
 .cache
 .DS_Store
+__pycache__/
+build/
+*.egg-info/
+logs/
+patches/nero_datacollect/pyAgxArm-master/recordings/
+# Legacy BrainCo hand SDK (own git clone, not used on the AgxGripper/Nero
+# main path per docs/HANDOFF.md) -- excluded instead of vendored/submoduled.
+patches/nero_datacollect/pyAgxArm-master/brainco_hand_service/

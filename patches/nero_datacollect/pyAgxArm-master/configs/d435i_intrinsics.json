@@ -1,0 +1,29 @@
+{
+  "generated_at": "2026-08-12T00:00:00+08:00",
+  "note": "Factory color-sensor intrinsics read via official pyrealsense2 on Windows (read_camera_intrinsics.py); 1280x720 entry copied from patches/camera_insrinsics.json. fx/fy/ppx/ppy scale with resolution; distortion coefficients are sensor-level and stay constant across resolutions for D400 series.",
+  "serial": "243222074905",
+  "name": "Intel RealSense D435I",
+  "firmware_version": "5.15.1.55",
+  "by_resolution": {
+    "640x480": {
+      "width": 640,
+      "height": 480,
+      "fx": 606.381,
+      "fy": 605.975,
+      "ppx": 331.115,
+      "ppy": 238.649,
+      "distortion_model": null,
+      "coeffs": null
+    },
+    "1280x720": {
+      "width": 1280,
+      "height": 720,
+      "fx": 909.57177734375,
+      "fy": 908.9627075195312,
+      "ppx": 656.6723022460938,
+      "ppy": 357.9732666015625,
+      "distortion_model": "distortion.inverse_brown_conrady",
+      "coeffs": [0.0, 0.0, 0.0, 0.0, 0.0]
+    }
+  }
+}

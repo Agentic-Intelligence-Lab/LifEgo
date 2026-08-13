@@ -386,11 +386,12 @@ K 的取值顺序：session 内 `aria_cam_rgb.json`（若存在）> `--fx/--fy` 
 
 ## 8. 采集 AprilTag 的 top_left 角点在机器人 base 坐标系下的坐标（供第 9 步标定用）
 
-脚本在 SDK 仓库里，和 `read_pose.py` 放在一起（依赖 pyAgxArm，需要在能连上机械臂 CAN 总线
-的机器上跑，不是 LifEgo 的 `$PY` 环境）：
+脚本在 `patches/nero_datacollect/`（数据采集 + 标定用的 SDK 仓库，和 `read_pose.py`
+放一起），依赖 pyAgxArm，需要在能连上机械臂 CAN 总线的机器上跑，用的是它自己的 conda
+环境，不是 LifEgo 的 `$PY`：
 
 ```text
-/Users/lexu/Research Exploration/Ego/nero-data-collect-win-tcp-end/pyAgxArm-master/collect_apriltag_corners.py
+patches/nero_datacollect/pyAgxArm-master/collect_apriltag_corners.py
 ```
 
 每个 tag 只需要碰 **1 个点**（top_left，即从相机方向看标签正面时的左上角），不用碰另外 3 个
@@ -409,10 +410,12 @@ K 的取值顺序：session 内 `aria_cam_rgb.json`（若存在）> `--fx/--fy` 
   恢复受控保持。**不要**在已经跑着主从联动的从臂上加这个参数，会和现有联动打架。
 
 ```bash
-cd nero-data-collect-win-tcp-end/pyAgxArm-master
+cd patches/nero_datacollect/pyAgxArm-master
 
 # 主从臂模式（假设从臂已在跟随主臂运动）；--tag-ids 用实际打印在 tag 上的 id
-python collect_apriltag_corners.py --tag-ids 1 2 --tcp-offset 0.13 --tag-size-m 0.05 --out tag_corners_base.json
+# --out 默认写到 LifEgo/examples/calib/tag_corners_base.json（第 9 步标定脚本读取的位置），
+# 不用再手动复制；如需另存别处再传 --out 覆盖。
+python collect_apriltag_corners.py --tag-ids 1 2 --tcp-offset 0.13 --tag-size-m 0.05
 
 # 单臂零力拖动模式
 python collect_apriltag_corners.py --tag-ids 1 2 --tcp-offset 0.13 --tag-size-m 0.05 --drag-teach

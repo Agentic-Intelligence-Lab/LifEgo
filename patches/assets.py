@@ -260,9 +260,9 @@ NERO_TABLE_V1 = SceneAssets(
             extrinsics=CameraExtrinsics(
                 T_cam_in_base=np.array(
                     [
-                        [-0.04450456948656329, 0.8667565391460602, -0.49674182946713885, 0.06198127016884403],
-                        [0.9987423482053, 0.05009420964901288, -0.002071728989170475, -0.34529807185210487],
-                        [0.023088204698059066, -0.4962093026205628, -0.8678958824632338, 0.8308843930732169],
+                        [0.03183660052227389, 0.7508783599965531, -0.6596727365565986, 0.08190806562366636],
+                        [0.9982977885613242, 0.00837981341705542, 0.05771745039990049, -0.3030280283129042],
+                        [0.04886671894812236, -0.6603873614901953, -0.749333421490903, 0.6040042835648946],
                         [0.0, 0.0, 0.0, 1.0],
                     ]
                 ),
@@ -272,10 +272,13 @@ NERO_TABLE_V1 = SceneAssets(
                 camera_target_base=None,
                 notes="Solved by patches/calibrate_realsense_extrinsic_from_apriltags.py from "
                 "tags 1+2 top_left corners (examples/calib/tag_corners_base.json) + "
-                "nero-data-collect-win-tcp-end/pyAgxArm-master/output1.png, reprojection RMSE "
-                "0.477 px. Full result: outputs/camera_extrinsics/camera_extrinsics.json. "
+                "patches/nero_datacollect/pyAgxArm-master/output4.png, reprojection RMSE "
+                "1.012 px. Full result: outputs/camera_extrinsics/camera_extrinsics.json. "
                 "Supersedes the soft camera_height_m/pitch_down_deg estimate used by "
-                "export_robot_eef_from_wilor.py's CLI defaults.",
+                "export_robot_eef_from_wilor.py's CLI defaults. "
+                "NOTE: camera position shifted substantially vs. the prior output1.png-based "
+                "solve (z: 0.831m -> 0.604m, ~23cm), and RMSE roughly doubled (0.477 -> 1.012 px) "
+                "-- verify the camera/rig hasn't moved and this is the intended calibration before trusting it.",
             ),
             capture={},
         ),
@@ -290,7 +293,7 @@ NERO_TABLE_V1 = SceneAssets(
         # required for the current pipeline. Fill in only if some other script needs it.
         T_tag_in_base=None,
         notes="tag_corners_base.json collected via "
-        "nero-data-collect-win-tcp-end/pyAgxArm-master/collect_apriltag_corners.py "
+        "patches/nero_datacollect/pyAgxArm-master/collect_apriltag_corners.py "
         "(top_left corner only, tcp_offset=0.13 m). "
         "Use patches/estimate_scale_apriltag.py to fill VGGT depth scale separately.",
     ),
@@ -316,9 +319,11 @@ NERO_TABLE_V1 = SceneAssets(
             ]
         ),
     },
-    notes="Primary Nero humanego→robot cell. Camera intrinsics/extrinsics and AprilTag "
-    "geometry calibrated 2026-08-10; workspace_center/half_size and T_base_in_world still "
-    "blank (not needed by the current pipeline).",
+    notes="Primary Nero humanego→robot cell. Camera intrinsics calibrated 2026-08-10; "
+    "extrinsics re-synced 2026-08-13 from outputs/camera_extrinsics/camera_extrinsics.json "
+    "(solved 2026-08-12 against output4.png). AprilTag geometry calibrated 2026-08-10; "
+    "workspace_center/half_size and T_base_in_world still blank (not needed by the current "
+    "pipeline).",
 )
 
 
