@@ -1,0 +1,511 @@
+{
+  "device": "RealSense D435I",
+  "serial": "243222074905",
+  "firmware": "5.15.1.55",
+  "profiles": [
+    {
+      "stream": "Color",
+      "fps": 6,
+      "format": "format.rgb8",
+      "intrinsics": {
+        "width": 424,
+        "height": 240,
+        "fx": 303.1905822753906,
+        "fy": 302.9875793457031,
+        "ppx": 217.5574188232422,
+        "ppy": 119.32441711425781,
+        "distortion_model": "distortion.inverse_brown_conrady",
+        "coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "stream": "Color",
+      "fps": 15,
+      "format": "format.rgb8",
+      "intrinsics": {
+        "width": 424,
+        "height": 240,
+        "fx": 303.1905822753906,
+        "fy": 302.9875793457031,
+        "ppx": 217.5574188232422,
+        "ppy": 119.32441711425781,
+        "distortion_model": "distortion.inverse_brown_conrady",
+        "coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "stream": "Color",
+      "fps": 30,
+      "format": "format.rgb8",
+      "intrinsics": {
+        "width": 424,
+        "height": 240,
+        "fx": 303.1905822753906,
+        "fy": 302.9875793457031,
+        "ppx": 217.5574188232422,
+        "ppy": 119.32441711425781,
+        "distortion_model": "distortion.inverse_brown_conrady",
+        "coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "stream": "Color",
+      "fps": 60,
+      "format": "format.rgb8",
+      "intrinsics": {
+        "width": 424,
+        "height": 240,
+        "fx": 303.1905822753906,
+        "fy": 302.9875793457031,
+        "ppx": 217.5574188232422,
+        "ppy": 119.32441711425781,
+        "distortion_model": "distortion.inverse_brown_conrady",
+        "coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "stream": "Color",
+      "fps": 6,
+      "format": "format.rgb8",
+      "intrinsics": {
+        "width": 640,
+        "height": 480,
+        "fx": 606.3811645507812,
+        "fy": 605.9751586914062,
+        "ppx": 331.1148376464844,
+        "ppy": 238.64883422851562,
+        "distortion_model": "distortion.inverse_brown_conrady",
+        "coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "stream": "Color",
+      "fps": 15,
+      "format": "format.rgb8",
+      "intrinsics": {
+        "width": 640,
+        "height": 480,
+        "fx": 606.3811645507812,
+        "fy": 605.9751586914062,
+        "ppx": 331.1148376464844,
+        "ppy": 238.64883422851562,
+        "distortion_model": "distortion.inverse_brown_conrady",
+        "coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "stream": "Color",
+      "fps": 30,
+      "format": "format.rgb8",
+      "intrinsics": {
+        "width": 640,
+        "height": 480,
+        "fx": 606.3811645507812,
+        "fy": 605.9751586914062,
+        "ppx": 331.1148376464844,
+        "ppy": 238.64883422851562,
+        "distortion_model": "distortion.inverse_brown_conrady",
+        "coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "stream": "Color",
+      "fps": 6,
+      "format": "format.rgb8",
+      "intrinsics": {
+        "width": 1280,
+        "height": 720,
+        "fx": 909.57177734375,
+        "fy": 908.9627075195312,
+        "ppx": 656.6723022460938,
+        "ppy": 357.9732666015625,
+        "distortion_model": "distortion.inverse_brown_conrady",
+        "coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "stream": "Color",
+      "fps": 10,
+      "format": "format.rgb8",
+      "intrinsics": {
+        "width": 1280,
+        "height": 720,
+        "fx": 909.57177734375,
+        "fy": 908.9627075195312,
+        "ppx": 656.6723022460938,
+        "ppy": 357.9732666015625,
+        "distortion_model": "distortion.inverse_brown_conrady",
+        "coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "stream": "Color",
+      "fps": 15,
+      "format": "format.rgb8",
+      "intrinsics": {
+        "width": 1280,
+        "height": 720,
+        "fx": 909.57177734375,
+        "fy": 908.9627075195312,
+        "ppx": 656.6723022460938,
+        "ppy": 357.9732666015625,
+        "distortion_model": "distortion.inverse_brown_conrady",
+        "coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "stream": "Color",
+      "fps": 8,
+      "format": "format.rgb8",
+      "intrinsics": {
+        "width": 1920,
+        "height": 1080,
+        "fx": 1364.357666015625,
+        "fy": 1363.444091796875,
+        "ppx": 985.0084228515625,
+        "ppy": 536.9598999023438,
+        "distortion_model": "distortion.inverse_brown_conrady",
+        "coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "stream": "Depth",
+      "fps": 90,
+      "format": "format.z16",
+      "intrinsics": {
+        "width": 256,
+        "height": 144,
+        "fx": 650.6885375976562,
+        "fy": 650.6885375976562,
+        "ppx": 128.80853271484375,
+        "ppy": 73.8265380859375,
+        "distortion_model": "distortion.brown_conrady",
+        "coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "stream": "Depth",
+      "fps": 6,
+      "format": "format.z16",
+      "intrinsics": {
+        "width": 480,
+        "height": 270,
+        "fx": 244.00820922851562,
+        "fy": 244.00820922851562,
+        "ppx": 240.30319213867188,
+        "ppy": 135.68495178222656,
+        "distortion_model": "distortion.brown_conrady",
+        "coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "stream": "Depth",
+      "fps": 15,
+      "format": "format.z16",
+      "intrinsics": {
+        "width": 480,
+        "height": 270,
+        "fx": 244.00820922851562,
+        "fy": 244.00820922851562,
+        "ppx": 240.30319213867188,
+        "ppy": 135.68495178222656,
+        "distortion_model": "distortion.brown_conrady",
+        "coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "stream": "Depth",
+      "fps": 30,
+      "format": "format.z16",
+      "intrinsics": {
+        "width": 480,
+        "height": 270,
+        "fx": 244.00820922851562,
+        "fy": 244.00820922851562,
+        "ppx": 240.30319213867188,
+        "ppy": 135.68495178222656,
+        "distortion_model": "distortion.brown_conrady",
+        "coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "stream": "Depth",
+      "fps": 60,
+      "format": "format.z16",
+      "intrinsics": {
+        "width": 480,
+        "height": 270,
+        "fx": 244.00820922851562,
+        "fy": 244.00820922851562,
+        "ppx": 240.30319213867188,
+        "ppy": 135.68495178222656,
+        "distortion_model": "distortion.brown_conrady",
+        "coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "stream": "Depth",
+      "fps": 30,
+      "format": "format.z16",
+      "intrinsics": {
+        "width": 640,
+        "height": 360,
+        "fx": 325.3442687988281,
+        "fy": 325.3442687988281,
+        "ppx": 320.4042663574219,
+        "ppy": 180.91326904296875,
+        "distortion_model": "distortion.brown_conrady",
+        "coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "stream": "Depth",
+      "fps": 6,
+      "format": "format.z16",
+      "intrinsics": {
+        "width": 640,
+        "height": 480,
+        "fx": 390.4131164550781,
+        "fy": 390.4131164550781,
+        "ppx": 320.485107421875,
+        "ppy": 241.09591674804688,
+        "distortion_model": "distortion.brown_conrady",
+        "coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "stream": "Depth",
+      "fps": 15,
+      "format": "format.z16",
+      "intrinsics": {
+        "width": 640,
+        "height": 480,
+        "fx": 390.4131164550781,
+        "fy": 390.4131164550781,
+        "ppx": 320.485107421875,
+        "ppy": 241.09591674804688,
+        "distortion_model": "distortion.brown_conrady",
+        "coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "stream": "Depth",
+      "fps": 30,
+      "format": "format.z16",
+      "intrinsics": {
+        "width": 640,
+        "height": 480,
+        "fx": 390.4131164550781,
+        "fy": 390.4131164550781,
+        "ppx": 320.485107421875,
+        "ppy": 241.09591674804688,
+        "distortion_model": "distortion.brown_conrady",
+        "coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "stream": "Depth",
+      "fps": 6,
+      "format": "format.z16",
+      "intrinsics": {
+        "width": 848,
+        "height": 480,
+        "fx": 431.0811462402344,
+        "fy": 431.0811462402344,
+        "ppx": 424.53564453125,
+        "ppy": 241.2100830078125,
+        "distortion_model": "distortion.brown_conrady",
+        "coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "stream": "Depth",
+      "fps": 8,
+      "format": "format.z16",
+      "intrinsics": {
+        "width": 848,
+        "height": 480,
+        "fx": 431.0811462402344,
+        "fy": 431.0811462402344,
+        "ppx": 424.53564453125,
+        "ppy": 241.2100830078125,
+        "distortion_model": "distortion.brown_conrady",
+        "coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "stream": "Depth",
+      "fps": 10,
+      "format": "format.z16",
+      "intrinsics": {
+        "width": 848,
+        "height": 480,
+        "fx": 431.0811462402344,
+        "fy": 431.0811462402344,
+        "ppx": 424.53564453125,
+        "ppy": 241.2100830078125,
+        "distortion_model": "distortion.brown_conrady",
+        "coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "stream": "Depth",
+      "fps": 6,
+      "format": "format.z16",
+      "intrinsics": {
+        "width": 1280,
+        "height": 720,
+        "fx": 650.6885375976562,
+        "fy": 650.6885375976562,
+        "ppx": 640.8085327148438,
+        "ppy": 361.8265380859375,
+        "distortion_model": "distortion.brown_conrady",
+        "coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    }
+  ]
+}

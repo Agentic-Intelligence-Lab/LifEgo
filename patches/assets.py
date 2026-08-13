@@ -246,15 +246,15 @@ NERO_TABLE_V1 = SceneAssets(
         "scene_rgb": CameraAsset(
             name="scene_rgb",
             intrinsics=CameraIntrinsics(
-                width=640,
-                height=480,
-                fx=606.381,
-                fy=605.975,
-                cx=331.115,
-                cy=238.649,
+                width=1280,
+                height=720,
+                fx=909.57177734375,
+                fy=908.9627075195312,
+                cx=656.6723022460938,
+                cy=357.9732666015625,
                 dist_coeffs=np.array([0.0, 0.0, 0.0, 0.0, 0.0]),
-                notes="RealSense D435i, 640x480 stream, read via "
-                "nero-data-collect-win-tcp-end/pyAgxArm-master/read_camera_intrinsics.py. "
+                notes="RealSense D435I (serial 243222074905, fw 5.15.1.55), 1280x720 Color "
+                "stream, factory intrinsics from patches/camera_insrinsics.json. "
                 "No distortion coefficients supplied; assumed zero.",
             ),
             extrinsics=CameraExtrinsics(

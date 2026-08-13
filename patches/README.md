@@ -443,6 +443,14 @@ python collect_apriltag_corners.py --tag-ids 1 2 --tcp-offset 0.13 --tag-size-m 
 + RealSense 内参，联合求解相机外参 `T_cam_in_base` 和每个 tag 在桌面上的朝向角。角点检测通过
 OpenCV `cv2.aruco` 自动完成，无需额外依赖。
 
+当前实验分辨率是 **1280x720**：`patches/assets.py` 的 `DEFAULT_ASSETS.scene_rgb` 内参已更新为
+1280x720 下的实测值（来自 `patches/camera_insrinsics.json`，RealSense D435I 序列号
+243222074905），不传 `--intrinsics-json` 时会自动用这组值。下面这个 `--images
+examples/calib/frame0.png` 的示例命令是历史 640x480 标定留下的（图和
+`examples/calib/realsense_intrinsics.json` 是配套的 640x480 对，两者都没改），只是演示格式；
+真要在 1280x720 下重新标定外参，需要用当前分辨率重新拍 AprilTag 照片，`--intrinsics-json`
+可以不传（走 assets 默认值）或显式传一份 1280x720 的内参 JSON。
+
 求解方式：先粗网格搜索每个 tag 的朝向角（`--yaw-grid-step-deg`，默认 15°）找一个好的起点，
 再用 `scipy.optimize.least_squares` 联合精修相机位姿和所有朝向角。因为两个 tag 都平放在同一
 桌面上，整组角点严格共面，单纯重投影误差最小化会有个二义解（相机被镜像到桌面另一侧、朝向和
