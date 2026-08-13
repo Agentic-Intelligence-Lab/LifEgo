@@ -12,7 +12,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 from assets import MUJOCO_NERO_SCENE
-from replay_utils_mujoco import as_abs, draw_marker_path, load_runtime, quat_xyzw_to_wxyz, require_runtime
+from utils_replay import as_abs, draw_marker_path, load_runtime, quat_xyzw_to_wxyz, require_runtime
 
 
 def load_eef(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

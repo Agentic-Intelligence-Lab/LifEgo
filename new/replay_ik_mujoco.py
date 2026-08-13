@@ -10,7 +10,7 @@ import time
 import numpy as np
 
 from assets import MUJOCO_NERO_SCENE
-from replay_utils_mujoco import as_abs, load_runtime, quat_xyzw_to_wxyz, require_runtime
+from utils_replay import as_abs, load_runtime, quat_xyzw_to_wxyz, require_runtime
 
 ARM_JOINTS = tuple(f"joint{i}" for i in range(1, 8))
 GRIPPER_JOINTS = ("gripper_joint1", "gripper_joint2")

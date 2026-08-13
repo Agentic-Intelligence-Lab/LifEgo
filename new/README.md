@@ -106,6 +106,15 @@ logic is contained in `HumanEgoMode`.
 camera calibration from `assets.py`. Axis correction is enabled by default and
 can be disabled with `--no-axis-correction`.
 
+`retarget_with_scipy.py`
+: Solves Nero IK from exported EEF targets with SciPy least-squares. This is the
+cleaned version of the old IK script and is kept as a baseline/reference solver.
+
+`retarget_with_mink.py`
+: Solves the same IK retargeting problem with mink. It writes the same `.npz`
+schema as the SciPy solver. Use this as the default retargeter for the RL
+pipeline.
+
 `replay_eef_mujoco.py`
 : Shows only exported EEF target markers in the fixed single-arm scene. The
 robot is not driven.
@@ -118,8 +127,11 @@ shows the target EEF marker.
 : Loads the fixed dual scene. The left robot follows real-bot JSONL data. The
 right robot optionally follows an IK `.npz`; without `--ik`, it stays static.
 
-`replay_utils_mujoco.py`
+`utils_replay.py`
 : Shared MuJoCo/OpenCV runtime helpers for replay scripts.
+
+`utils_retarget.py`
+: Shared MuJoCo, trajectory, and IK result helpers for retargeting scripts.
 
 `tmp_compare_eef_replay.py`
 : Temporary comparison script for old-vs-new EEF trajectories.
@@ -146,6 +158,18 @@ Export EEF targets:
   --out outputs/new_pipeline/ego_nero_easy/robot_eef_scene_camera
 ```
 
+Retarget EEF targets with mink:
+
+```bash
+/home/ymq/miniconda3/envs/lifego/bin/python new/retarget_with_mink.py
+```
+
+Retarget EEF targets with SciPy baseline:
+
+```bash
+/home/ymq/miniconda3/envs/lifego/bin/python new/retarget_with_scipy.py
+```
+
 Replay EEF markers only:
 
 ```bash
@@ -169,6 +193,23 @@ Replay real-bot data with optional IK comparison:
 ```
 
 Without `--viewer`, replay scripts render MP4 files instead of opening a window.
+
+## Retarget Solver Choice
+
+`retarget_with_mink.py` is the preferred solver for the current RL setup. On a
+60-frame smoke test from `outputs/new_pipeline/ego_nero_easy`, mink produced
+lower position error and smoother joint motion than the SciPy baseline, while
+SciPy produced slightly lower orientation error.
+
+```text
+solver  pos mean/max mm  ang mean/max deg  |dq| mean/max  |ddq| mean/max
+mink    0.32 / 0.51      3.12 / 5.04       0.015 / 0.029  0.004 / 0.013
+scipy   5.30 / 8.58      2.09 / 3.36       0.015 / 0.038  0.005 / 0.044
+```
+
+For downstream RL, mink is a better initial IK source because it tracks EEF
+position more accurately and has fewer large joint accelerations. Use SciPy when
+comparing against the older least-squares behavior.
 
 ## Main Outputs
 
@@ -212,4 +253,3 @@ gripper_width_m
 pos_err_m
 ang_err_deg
 ```
-
