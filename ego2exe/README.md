@@ -4,7 +4,7 @@
 
 ```bash
 cd LifEgo
-PY=/home/ymq/miniconda3/envs/lifego/bin/python
+PY=python
 ```
 
 ## 安装（首次）
@@ -160,7 +160,7 @@ from `assets/mujoco_nero_scene/`.
 Run WiLoR on one video:
 
 ```bash
-/home/ymq/miniconda3/envs/lifego/bin/python new/preprocess_wilor_hands.py \
+python ego2exe/preprocess_wilor_hands.py \
   --video examples/ego_nero_easy.mp4 \
   --out outputs/new_pipeline
 ```
@@ -168,7 +168,7 @@ Run WiLoR on one video:
 Export EEF targets:
 
 ```bash
-/home/ymq/miniconda3/envs/lifego/bin/python new/preprocess_export_eef.py \
+python ego2exe/preprocess_export_eef.py \
   --session outputs/new_pipeline/ego_nero_easy \
   --out outputs/new_pipeline/ego_nero_easy/robot_eef_scene_camera
 ```
@@ -176,25 +176,25 @@ Export EEF targets:
 Retarget EEF targets with mink:
 
 ```bash
-/home/ymq/miniconda3/envs/lifego/bin/python new/retarget_with_mink.py
+python ego2exe/retarget_with_mink.py
 ```
 
 Retarget EEF targets with SciPy baseline:
 
 ```bash
-/home/ymq/miniconda3/envs/lifego/bin/python new/retarget_with_scipy.py
+python ego2exe/retarget_with_scipy.py
 ```
 
 Check the mjlab RL scene:
 
 ```bash
-/home/ymq/miniconda3/envs/lifego/bin/python new/rl_env_mjlab.py --check scene
+python ego2exe/rl_env_mjlab.py --check scene
 ```
 
 Train the mjlab residual policy:
 
 ```bash
-/home/ymq/miniconda3/envs/lifego/bin/python new/rl_train_mjlab.py \
+python ego2exe/rl_train_mjlab.py \
   Mjlab-Nero-IK-Residual \
   --agent.max-iterations 500 \
   --agent.logger tensorboard \
@@ -205,7 +205,7 @@ Train the mjlab residual policy:
 Evaluate checkpoints headlessly:
 
 ```bash
-/home/ymq/miniconda3/envs/lifego/bin/python new/rl_eval_mjlab.py \
+python ego2exe/rl_eval_mjlab.py \
   Mjlab-Nero-IK-Residual \
   --include-zero \
   --steps 240 \
@@ -216,7 +216,7 @@ Evaluate checkpoints headlessly:
 Open the mjlab viewer from a local graphics session:
 
 ```bash
-/home/ymq/miniconda3/envs/lifego/bin/python new/rl_play_mjlab.py \
+python ego2exe/rl_play_mjlab.py \
   Mjlab-Nero-IK-Residual \
   --agent zero \
   --viewer native
@@ -225,21 +225,21 @@ Open the mjlab viewer from a local graphics session:
 Replay EEF markers only:
 
 ```bash
-/home/ymq/miniconda3/envs/lifego/bin/python new/replay_eef_mujoco.py \
+python ego2exe/replay_eef_mujoco.py \
   --viewer --gl-backend glfw
 ```
 
 Replay IK:
 
 ```bash
-/home/ymq/miniconda3/envs/lifego/bin/python new/replay_ik_mujoco.py \
+python ego2exe/replay_ik_mujoco.py \
   --viewer --gl-backend glfw
 ```
 
 Replay real-bot data with optional IK comparison:
 
 ```bash
-/home/ymq/miniconda3/envs/lifego/bin/python new/replay_realbot_mujoco.py \
+python ego2exe/replay_realbot_mujoco.py \
   --viewer --gl-backend glfw \
   --ik outputs/new_pipeline/ego_nero_easy/nero_eef_ik/nero_eef_ik.npz
 ```
@@ -311,7 +311,7 @@ RL defaults:
 
 ```text
 task: Mjlab-Nero-IK-Residual
-scene: new/assets/mujoco_nero_scene/scene.xml
+scene: ego2exe/assets/mujoco_nero_scene/scene.xml
 eef: outputs/new_pipeline/ego_nero_easy/robot_eef_scene_camera_axis_corrected/robot_eef_trajectory.json
 ik: outputs/new_pipeline/ego_nero_easy/nero_eef_ik/nero_eef_ik.npz
 ```
