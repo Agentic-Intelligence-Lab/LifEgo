@@ -138,6 +138,11 @@ robot is not driven.
 : Loads an IK `.npz`, drives robot joints in the fixed single-arm scene, and
 shows the target EEF marker.
 
+`replay_ik_nero.py`
+: Dry-runs or executes a mink/RL IK `.npz` on the real Nero arm. It uses
+pyAgxArm `move_j` waypoint replay and requires explicit `--execute` confirmation
+before sending robot commands.
+
 `replay_realbot_mujoco.py`
 : Loads the fixed dual scene. The left robot follows real-bot JSONL data. The
 right robot optionally follows an IK `.npz`; without `--ik`, it stays static.
@@ -236,6 +241,36 @@ python ego2exe/replay_ik_mujoco.py \
   --viewer --gl-backend glfw
 ```
 
+Dry-run real Nero IK replay:
+
+```bash
+python ego2exe/replay_ik_nero.py \
+  --ik outputs/new_pipeline/ego_nero_easy/nero_eef_ik/nero_eef_ik.npz
+```
+
+Run a short low-speed real Nero test:
+
+```bash
+python ego2exe/replay_ik_nero.py \
+  --ik outputs/new_pipeline/ego_nero_easy/nero_eef_ik/nero_eef_ik.npz \
+  --end 20 \
+  --stride 2 \
+  --speed-percent 10 \
+  --approach \
+  --execute
+```
+
+Run the full real Nero replay with AgxGripper width commands:
+
+```bash
+python ego2exe/replay_ik_nero.py \
+  --ik outputs/new_pipeline/ego_nero_easy/nero_eef_ik/nero_eef_ik.npz \
+  --speed-percent 10 \
+  --approach \
+  --gripper \
+  --execute
+```
+
 Replay real-bot data with optional IK comparison:
 
 ```bash
@@ -246,6 +281,10 @@ python ego2exe/replay_realbot_mujoco.py \
 
 Without `--viewer`, replay scripts render MP4 files instead of opening a window.
 Do not start viewer commands from an SSH session.
+
+`replay_ik_nero.py` defaults to dry-run and does not connect to the robot unless
+`--execute` is set. It uses `move_j` rather than `move_js`; the pyAgxArm docs
+mark `move_js` as unsmoothed fast-response control and high risk.
 
 ## Retarget Solver Choice
 
