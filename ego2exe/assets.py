@@ -25,9 +25,9 @@ from typing import Any
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-NEW_ROOT = REPO_ROOT / "new"
-MUJOCO_NERO_SCENE = NEW_ROOT / "assets" / "mujoco_nero_scene" / "scene.xml"
-MUJOCO_NERO_DUAL_SCENE = NEW_ROOT / "assets" / "mujoco_nero_scene" / "scene_dual_compare.xml"
+EGO2EXE_ROOT = Path(__file__).resolve().parent
+MUJOCO_NERO_SCENE = EGO2EXE_ROOT / "assets" / "mujoco_nero_scene" / "scene.xml"
+MUJOCO_NERO_DUAL_SCENE = EGO2EXE_ROOT / "assets" / "mujoco_nero_scene" / "scene_dual_compare.xml"
 
 
 # ---------------------------------------------------------------------------

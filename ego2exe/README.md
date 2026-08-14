@@ -160,7 +160,17 @@ right robot optionally follows an IK `.npz`; without `--ik`, it stays static.
 : Legacy scene builder kept for reference. The replay path now uses fixed scenes
 from `assets/mujoco_nero_scene/`.
 
+`scripts/preprocess.sh`
+: End-to-end preprocessing wrapper for one RGB video: WiLoR hands, EEF export,
+mink IK, and headless EEF/IK replay MP4s.
+
 ## Common Commands
+
+Run the full preprocessing pipeline on one video:
+
+```bash
+ego2exe/scripts/preprocess.sh examples/ego_nero_easy.mp4
+```
 
 Run WiLoR on one video:
 
