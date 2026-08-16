@@ -260,9 +260,9 @@ NERO_TABLE_V1 = SceneAssets(
             extrinsics=CameraExtrinsics(
                 T_cam_in_base=np.array(
                     [
-                        [0.03183660052227389, 0.7508783599965531, -0.6596727365565986, 0.08190806562366636],
-                        [0.9982977885613242, 0.00837981341705542, 0.05771745039990049, -0.3030280283129042],
-                        [0.04886671894812236, -0.6603873614901953, -0.749333421490903, 0.6040042835648946],
+                        [-0.06640093907919233, 0.8931516773924303, -0.4448269286593267, -0.028984821637799026],
+                        [0.9976939458559392, 0.0657137003644242, -0.01698528736351997, -0.4375444455059773],
+                        [0.014060785604225665, -0.4449289727085697, -0.8954554726800706, 0.5648349184610941],
                         [0.0, 0.0, 0.0, 1.0],
                     ]
                 ),
@@ -271,14 +271,14 @@ NERO_TABLE_V1 = SceneAssets(
                 optical_projection_base=None,
                 camera_target_base=None,
                 notes="Solved by patches/calibrate_realsense_extrinsic_from_apriltags.py from "
-                "tags 1+2 top_left corners (examples/calib/tag_corners_base.json) + "
-                "patches/nero_datacollect/pyAgxArm-master/output4.png, reprojection RMSE "
-                "1.012 px. Full result: outputs/camera_extrinsics/camera_extrinsics.json. "
-                "Supersedes the soft camera_height_m/pitch_down_deg estimate used by "
-                "export_robot_eef_from_wilor.py's CLI defaults. "
-                "NOTE: camera position shifted substantially vs. the prior output1.png-based "
-                "solve (z: 0.831m -> 0.604m, ~23cm), and RMSE roughly doubled (0.477 -> 1.012 px) "
-                "-- verify the camera/rig hasn't moved and this is the intended calibration before trusting it.",
+                "tags 1+2 top_left corners (datacollection/pyAgxArm/tag_corners_base.json) + "
+                "3 averaged RealSense captures (outputs/camera_extrinsics/captured/capture_00..02.png), "
+                "tag family DICT_APRILTAG_36h11, tag_size_m 0.05, reprojection RMSE 0.592 px "
+                "(per-frame standalone-vs-pooled deltas <0.07deg / <0.5mm -- rig was static across shots). "
+                "Full result: outputs/camera_extrinsics/camera_extrinsics.json. "
+                "Supersedes the prior output4.png-based solve (RMSE 1.012 px; camera position moved "
+                "from [0.082,-0.303,0.604] to [-0.029,-0.438,0.565], ~14cm -- verify this reflects an "
+                "actual rig move, not solve noise, before trusting downstream results.",
             ),
             capture={},
         ),
@@ -292,8 +292,8 @@ NERO_TABLE_V1 = SceneAssets(
         # single T_tag_in_base — T_cam_in_base above was solved directly, so this is not
         # required for the current pipeline. Fill in only if some other script needs it.
         T_tag_in_base=None,
-        notes="tag_corners_base.json collected via "
-        "patches/nero_datacollect/pyAgxArm-master/collect_apriltag_corners.py "
+        notes="tag_corners_base.json (datacollection/pyAgxArm/tag_corners_base.json) collected via "
+        "datacollection/pyAgxArm/collect_apriltag_corners.py "
         "(top_left corner only, tcp_offset=0.13 m). "
         "Use patches/estimate_scale_apriltag.py to fill VGGT depth scale separately.",
     ),
@@ -320,10 +320,10 @@ NERO_TABLE_V1 = SceneAssets(
         ),
     },
     notes="Primary Nero humanego→robot cell. Camera intrinsics calibrated 2026-08-10; "
-    "extrinsics re-synced 2026-08-13 from outputs/camera_extrinsics/camera_extrinsics.json "
-    "(solved 2026-08-12 against output4.png). AprilTag geometry calibrated 2026-08-10; "
-    "workspace_center/half_size and T_base_in_world still blank (not needed by the current "
-    "pipeline).",
+    "extrinsics re-synced 2026-08-16 from outputs/camera_extrinsics/camera_extrinsics.json "
+    "(DICT_APRILTAG_36h11, 3 averaged captures, RMSE 0.592 px). AprilTag geometry calibrated "
+    "2026-08-10; workspace_center/half_size and T_base_in_world still blank (not needed by the "
+    "current pipeline).",
 )
 
 
