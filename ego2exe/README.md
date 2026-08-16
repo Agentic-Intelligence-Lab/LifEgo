@@ -270,6 +270,25 @@ python ego2exe/replay_ik_nero.py \
   --execute
 ```
 
+Run the same test, but first use `move_p` to align the real TCP to the first
+ego-video EEF target:
+
+```bash
+python ego2exe/replay_ik_nero.py \
+  --ik outputs/new_pipeline/ego_nero_easy/nero_eef_ik/nero_eef_ik.npz \
+  --end 20 \
+  --stride 2 \
+  --prealign-move-p \
+  --prealign-speed-percent 5 \
+  --speed-percent 10 \
+  --execute
+```
+
+After `move_p` reaches the first target, the script pauses for `READY` before
+starting `move_j` replay. If the full first-frame orientation is hard for the
+controller to solve from the current posture, add `--prealign-position-only` to
+align xyz while keeping the current TCP orientation.
+
 Run the full real Nero replay with AgxGripper width commands:
 
 ```bash
@@ -295,6 +314,9 @@ Do not start viewer commands from an SSH session.
 `replay_ik_nero.py` defaults to dry-run and does not connect to the robot unless
 `--execute` is set. It uses `move_j` rather than `move_js`; the pyAgxArm docs
 mark `move_js` as unsmoothed fast-response control and high risk.
+`--prealign-move-p` uses the IK file's first `target_pos_m` /
+`target_quat_xyzw` TCP target and the default TCP offset `[0.13, 0, 0]` to
+compute the flange command for `move_p`.
 
 ## Retarget Solver Choice
 

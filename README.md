@@ -155,6 +155,22 @@ python ego2exe/replay_ik_nero.py \
 实际下发 Nero 控制命令必须显式加 `--execute`。脚本使用 `pyAgxArm` 的 `move_j` 按 waypoint 回放，
 不使用高风险的 `move_js` 快速响应模式。
 
+如果需要先把真机从任意当前位置缓慢移动到 ego 视频第一帧 EEF，可开启 `move_p` 预对齐：
+
+```bash
+python ego2exe/replay_ik_nero.py \
+  --ik outputs/new_pipeline/ego_nero_easy/nero_eef_ik/nero_eef_ik.npz \
+  --end 20 \
+  --stride 2 \
+  --prealign-move-p \
+  --prealign-speed-percent 5 \
+  --speed-percent 10 \
+  --execute
+```
+
+该阶段会用第一帧 TCP target 和 `tcp_offset=[0.13, 0, 0]` 反算 `move_p` 所需的 flange pose。到位后脚本会等待
+输入 `READY`，再开始 `move_j` 回放。
+
 ## RL 流程
 
 RL 阶段不从零学习 IK，而是在 mink 初始 IK 轨迹上学习 residual offset，用来优化 EEF tracking 和动作平滑性。
