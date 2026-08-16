@@ -200,12 +200,13 @@ def validate_trajectory(
             print(f"[warn] {msg}")
 
 
-def summarize(traj: IkTrajectory, *, speed_percent: int, execute: bool) -> None:
+def summarize(traj: IkTrajectory, *, speed_percent: int, execute: bool, command_settle_s: float) -> None:
     q_deg = np.rad2deg(traj.q)
     duration = float(traj.time_s[-1]) if traj.n else 0.0
     print("--- IK replay plan ---")
     print(f"frames: {traj.n}  source: {traj.source_indices[0]}..{traj.source_indices[-1]}")
     print(f"time span: {duration:.3f}s  speed_percent: {speed_percent}")
+    print(f"command_settle_s: {command_settle_s:.3f}")
     print(f"execute: {execute}")
     print("joint deg min:", np.round(np.min(q_deg, axis=0), 2).tolist())
     print("joint deg max:", np.round(np.max(q_deg, axis=0), 2).tolist())
@@ -342,20 +343,35 @@ def wait_until_reached(
     *,
     timeout: float,
     tolerance_rad: float,
+    min_wait_s: float = 0.0,
 ) -> bool:
+    start = time.monotonic()
+    if min_wait_s > 0.0:
+        time.sleep(float(min_wait_s))
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         current = read_joints(robot)
         max_error = max(abs(actual - desired) for actual, desired in zip(current, target))
-        if max_error <= tolerance_rad:
+        if max_error <= tolerance_rad and time.monotonic() - start >= min_wait_s:
             print(f"reached: max joint error {math.degrees(max_error):.3f} deg")
             return True
         time.sleep(0.1)
 
     current = read_joints(robot)
-    max_error = max(abs(actual - desired) for actual, desired in zip(current, target))
-    print(f"motion timeout: max joint error {math.degrees(max_error):.3f} deg")
+    errors = [actual - desired for actual, desired in zip(current, target)]
+    abs_errors = [abs(value) for value in errors]
+    worst = int(np.argmax(abs_errors))
+    max_error = abs_errors[worst]
+    print(
+        f"motion timeout: max joint error {math.degrees(max_error):.3f} deg "
+        f"on joint{worst + 1}"
+    )
+    print(f"target joints: {format_degrees(target)}")
     print(f"final joints: {format_degrees(current)}")
+    print(
+        "joint errors:",
+        "[" + ", ".join(f"{math.degrees(float(value)):+.3f}" for value in errors) + "] deg",
+    )
     return False
 
 
@@ -479,6 +495,7 @@ def replay_on_robot(args: argparse.Namespace, traj: IkTrajectory) -> int:
                     q.tolist(),
                     timeout=args.motion_timeout,
                     tolerance_rad=args.joint_tol_rad,
+                    min_wait_s=args.command_settle_s,
                 ):
                     return 1
 
@@ -497,6 +514,7 @@ def replay_on_robot(args: argparse.Namespace, traj: IkTrajectory) -> int:
                 q.tolist(),
                 timeout=args.motion_timeout,
                 tolerance_rad=args.joint_tol_rad,
+                min_wait_s=args.command_settle_s,
             )
             if not ok:
                 return 1
@@ -564,6 +582,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--enable-timeout", type=float, default=15.0)
     parser.add_argument("--motion-timeout", type=float, default=30.0)
     parser.add_argument("--joint-tol-deg", type=float, default=2.0)
+    parser.add_argument(
+        "--command-settle-s",
+        type=float,
+        default=0.0,
+        help="Minimum time to wait after each move_j before checking joint tolerance.",
+    )
     parser.add_argument("--max-initial-jump-deg", type=float, default=20.0)
     parser.add_argument("--approach", action="store_true", help="Interpolate current joints to the first IK waypoint")
     parser.add_argument("--approach-step-deg", type=float, default=5.0)
@@ -635,7 +659,14 @@ def main() -> int:
         max_step_rad=args.max_step_rad,
         allow_large_steps=args.allow_large_steps,
     )
-    summarize(traj, speed_percent=args.speed_percent, execute=args.execute)
+    if args.command_settle_s < 0.0:
+        raise ValueError("--command-settle-s must be non-negative")
+    summarize(
+        traj,
+        speed_percent=args.speed_percent,
+        execute=args.execute,
+        command_settle_s=args.command_settle_s,
+    )
     if args.prealign_move_p:
         print(f"first target tcp: {format_pose(first_tcp_pose_from_ik(traj))}")
     if args.write_plan:
