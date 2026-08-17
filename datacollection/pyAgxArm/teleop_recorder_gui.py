@@ -41,7 +41,14 @@ IDLE_CAMERA_PREVIEW = HERE / "camera_idle_preview.py"
 # instead. On the real (Windows) deployment target, official pyrealsense2
 # wheels are stable -- switch back to "realsense" there.
 DEFAULT_CAMERA_BACKEND = "opencv"  # "opencv" (D435i as plain UVC, or Dabai) or "realsense"
-DEFAULT_CAMERA_INDEX = 0  # D435i color sensor on this machine (verified via cv2 enumeration)
+# cv2 V4L2 enumeration order for the D435i's color node is per-machine and does not
+# match macOS: index 0 doesn't even open here, and 1/2/3/5 are IR/depth/metadata nodes
+# (verified by reading each /dev/videoN directly). 4 is the real color stream on this
+# Linux box today. If it breaks after a reboot/replug, re-verify with:
+#   /dev/v4l/by-id/usb-Intel_R__RealSense_TM__Depth_Camera_435i_*-video-index0
+# (that by-id symlink is stable across replugs/reboots; check what /dev/videoN it points
+# to and update the constant below.)
+DEFAULT_CAMERA_INDEX = 4 if platform_system() == "Linux" else 0  # D435i color sensor (verified via cv2 enumeration)
 DEFAULT_CAMERA_SERIAL = "auto"  # only used when DEFAULT_CAMERA_BACKEND == "realsense"
 DEFAULT_CAMERA_ROTATE = 0
 DEFAULT_CAMERA_WIDTH = 1280
@@ -163,6 +170,18 @@ class TeleopRecorderGUI:
         self.video_path: Optional[Path] = None
         self.camera_preview_path: Optional[Path] = Path(tempfile.gettempdir()) / (
             f"nero_teleop_gui_{os.getpid()}_camera.png"
+        )
+        # Shared with the persistent camera service (see _start_idle_camera_preview):
+        # lets a recording subprocess start/stop an MP4 segment on the *same*
+        # already-open capture instead of reopening the device.
+        self.camera_control_path: Path = Path(tempfile.gettempdir()) / (
+            f"nero_teleop_gui_{os.getpid()}_camera.control.json"
+        )
+        self.camera_status_path: Path = Path(tempfile.gettempdir()) / (
+            f"nero_teleop_gui_{os.getpid()}_camera.status.json"
+        )
+        self.camera_meta_path: Path = Path(tempfile.gettempdir()) / (
+            f"nero_teleop_gui_{os.getpid()}_camera.meta.json"
         )
         self.camera_preview_photo: Optional[tk.PhotoImage] = None
         self.camera_preview_mtime_ns = 0
@@ -757,6 +776,12 @@ class TeleopRecorderGUI:
                 self.camera_preview_path.unlink(missing_ok=True)
             except OSError:
                 pass
+        for path in (self.camera_control_path, self.camera_status_path, self.camera_meta_path):
+            try:
+                path.unlink(missing_ok=True)
+                path.with_suffix(path.suffix + ".tmp").unlink(missing_ok=True)
+            except OSError:
+                pass
         self.camera_preview_path = None
         self.camera_preview_photo = None
         self.camera_preview_mtime_ns = 0
@@ -795,6 +820,16 @@ class TeleopRecorderGUI:
             DEFAULT_CAMERA_BACKEND,
             "--rotate",
             str(DEFAULT_CAMERA_ROTATE),
+            "--width",
+            str(DEFAULT_CAMERA_WIDTH),
+            "--height",
+            str(DEFAULT_CAMERA_HEIGHT),
+            "--control-path",
+            str(self.camera_control_path),
+            "--status-path",
+            str(self.camera_status_path),
+            "--meta-path",
+            str(self.camera_meta_path),
         ]
         if DEFAULT_CAMERA_BACKEND == "opencv":
             preview_args += ["--camera-index", str(DEFAULT_CAMERA_INDEX)]
@@ -1033,9 +1068,18 @@ class TeleopRecorderGUI:
         if not RECORDER.exists():
             messagebox.showerror("缺少后端", f"找不到 {RECORDER}")
             return
+        if (
+            self.idle_camera_process is None
+            or self.idle_camera_process.poll() is not None
+            or not self.idle_camera_ready
+        ):
+            messagebox.showerror(
+                "相机未就绪",
+                f"{CAMERA_LABEL} 预览尚未连接，无法开始采集。"
+                + (f"\n{self.idle_camera_error}" if self.idle_camera_error else ""),
+            )
+            return
 
-        self._stop_idle_camera_preview(wait_release=True)
-        self.append_log("已释放预览相机，正在启动录制进程…")
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         self.output_path = directory / f"{session_name}_{stamp}.jsonl"
         self.video_path = self.output_path.with_suffix(".rgb.mp4")
@@ -1071,13 +1115,13 @@ class TeleopRecorderGUI:
             task,
             "--camera",
             "--camera-backend",
-            DEFAULT_CAMERA_BACKEND,
-        ]
-        if DEFAULT_CAMERA_BACKEND == "opencv":
-            command += ["--camera-index", str(DEFAULT_CAMERA_INDEX)]
-        else:
-            command += ["--camera-serial", DEFAULT_CAMERA_SERIAL]
-        command += [
+            "external",
+            "--camera-control-path",
+            str(self.camera_control_path),
+            "--camera-status-path",
+            str(self.camera_status_path),
+            "--camera-meta-path",
+            str(self.camera_meta_path),
             "--camera-width",
             str(DEFAULT_CAMERA_WIDTH),
             "--camera-height",
@@ -1086,8 +1130,6 @@ class TeleopRecorderGUI:
             str(DEFAULT_CAMERA_ROTATE),
             "--camera-video",
             str(self.video_path),
-            "--camera-preview-path",
-            str(self.camera_preview_path),
             "--no-execute-hand",
             "--keep-unaligned",
         ]
@@ -1574,9 +1616,22 @@ class TeleopRecorderGUI:
             "normal",
         )
 
+    def _force_stop_camera_segment(self) -> None:
+        """Safety net: make sure the persistent camera service isn't left mid-segment
+        if the recorder subprocess died/was killed without sending its own stop."""
+        try:
+            temporary = self.camera_control_path.with_suffix(
+                self.camera_control_path.suffix + ".tmp"
+            )
+            temporary.write_text(json.dumps({"cmd": "force_stop"}), encoding="utf-8")
+            os.replace(temporary, self.camera_control_path)
+        except OSError:
+            pass
+
     def _finish_process(self, return_code: int) -> None:
         process = self.process
         self.process = None
+        self._force_stop_camera_segment()
         self._read_new_samples()
         self._update_live_display()
         if self.tail_file is not None:
@@ -1648,6 +1703,7 @@ class TeleopRecorderGUI:
         if process is not None and process.stdout is not None:
             process.stdout.close()
         if self.close_after_stop:
+            self._stop_idle_camera_preview()
             self._cleanup_camera_preview()
             self.root.destroy()
         else:

@@ -29,6 +29,52 @@ matches collect_apriltag_corners.py's output):
       }
     }
 
+Tag family: pass --tag-family with a short name -- 16h5, 25h9, 36h10, 36h11, or
+41h12 (default). 16h5/25h9/36h10/36h11 are detected via cv2.aruco (OpenCV ships
+these built in). 41h12 is not shipped by cv2.aruco, so it's detected via
+`pupil_apriltags` instead (pip install pupil-apriltags), which wraps the
+official AprilRobotics C library. Full names (DICT_APRILTAG_36h11,
+tagStandard41h12, ...) also work if you need them.
+
+    --tag-family 36h11      # cv2.aruco
+    --tag-family 41h12      # pupil_apriltags (default)
+
+Input images: either point at existing photo(s) with --images, or have the
+script take the photo itself with --capture (RealSense by default; add more
+--images to also mix in previously captured frames). Examples:
+
+    # Use an existing photo
+    python patches/calibrate_realsense_extrinsic_from_apriltags.py \\
+        --images outputs/camera_extrinsics/captured/shot.png \\
+        --tag-corners-base datacollection/pyAgxArm/tag_corners_base.json
+
+    # Let the script capture a photo itself (RealSense, default 1920x1080@8fps --
+    # that's the highest fps the D435i's RGB sensor supports at 1080p)
+    python patches/calibrate_realsense_extrinsic_from_apriltags.py \\
+        --capture --capture-count 3 \\
+        --tag-corners-base datacollection/pyAgxArm/tag_corners_base.json
+
+    # Lower resolution instead (supports higher fps: 1280x720@15, 640x480@30, ...)
+    python patches/calibrate_realsense_extrinsic_from_apriltags.py \\
+        --capture --capture-width 1280 --capture-height 720 --capture-fps 15 \\
+        --tag-corners-base datacollection/pyAgxArm/tag_corners_base.json
+
+    # Capture with a plain UVC/OpenCV camera instead of RealSense
+    python patches/calibrate_realsense_extrinsic_from_apriltags.py \\
+        --capture --capture-backend opencv --camera-index 1 \\
+        --tag-corners-base datacollection/pyAgxArm/tag_corners_base.json
+
+Intrinsics: by default (no --intrinsics-json) intrinsics are looked up in the
+factory multi-resolution table patches/camera_insrinsics.json, keyed by
+whatever resolution was actually captured/used (--resolution is auto-set from
+--capture-width/--capture-height, or from the first --images frame's real
+pixel size) -- so switching --capture-width/--capture-height (e.g. to 1080p)
+picks up the matching fx/fy/cx/cy automatically instead of silently reusing
+another resolution's numbers at the wrong scale. A resolution missing from
+that table falls back to patches/assets.py's single scene_rgb entry; a
+mismatch between the resolved intrinsics and the actual image size prints a
+[warn] rather than failing silently.
+
 Input JSON for --intrinsics-json (RealSense pyrealsense2.intrinsics-style
 fields also accepted: ppx/ppy in place of cx/cy, coeffs in place of
 dist_coeffs; a top-level "by_resolution" map with one entry per resolution,
@@ -53,6 +99,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 import cv2
@@ -62,6 +109,14 @@ from scipy.spatial.transform import Rotation as R
 from assets import DEFAULT_ASSETS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# Factory-measured RealSense intrinsics at multiple resolutions (produced by
+# read_camera_intrinsics.py's device, "profiles" list keyed by stream/fps/resolution --
+# intrinsics don't vary with fps, only resolution, so this is deduped to one entry per
+# (stream, width, height)). Used by load_intrinsics() as the default source instead of
+# the single fixed resolution hardcoded in patches/assets.py, so --capture-width/-height
+# (e.g. the 1920x1080 default) picks up matching intrinsics automatically.
+FACTORY_INTRINSICS_JSON = REPO_ROOT / "patches" / "camera_insrinsics.json"
 
 PNP_METHOD_ATTRS = {
     "sqpnp": "SOLVEPNP_SQPNP",
@@ -90,36 +145,80 @@ def matrix_record(T: np.ndarray) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def load_factory_intrinsics_by_resolution(path: Path) -> dict[str, dict] | None:
+    """Parse read_camera_intrinsics.py-style factory JSON (patches/camera_insrinsics.json's
+    "profiles" list: one entry per stream/fps/resolution) into a by_resolution map
+    {"WIDTHxHEIGHT": {fx,fy,cx,cy,dist_coeffs,width,height}} for the Color stream, deduped
+    (intrinsics are constant across fps for a given resolution on D400-series). Returns
+    None if the file doesn't exist."""
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text(encoding="utf-8"))
+    by_res: dict[str, dict] = {}
+    for profile in data.get("profiles", []):
+        if profile.get("stream") != "Color":
+            continue
+        intr = profile.get("intrinsics", {})
+        w, h = intr.get("width"), intr.get("height")
+        if w is None or h is None:
+            continue
+        by_res[f"{w}x{h}"] = {
+            "fx": intr["fx"],
+            "fy": intr["fy"],
+            "cx": intr.get("ppx", intr.get("cx")),
+            "cy": intr.get("ppy", intr.get("cy")),
+            "dist_coeffs": intr.get("coeffs", intr.get("dist_coeffs")),
+            "width": w,
+            "height": h,
+        }
+    return by_res or None
+
+
 def load_intrinsics(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarray, dict]:
     data: dict = {}
+    source_desc = None
     if args.intrinsics_json:
         data = json.loads(as_abs(args.intrinsics_json).read_text(encoding="utf-8"))
+        source_desc = args.intrinsics_json
     elif args.fx is None and args.fy is None:
-        # No --intrinsics-json and no CLI overrides: fall back to the scene_rgb
-        # camera intrinsics already calibrated in patches/assets.py.
-        cam_intr = DEFAULT_ASSETS.camera().intrinsics
-        if cam_intr.is_filled():
-            data = {
-                "fx": cam_intr.fx,
-                "fy": cam_intr.fy,
-                "cx": cam_intr.cx,
-                "cy": cam_intr.cy,
-                "dist_coeffs": None if cam_intr.dist_coeffs is None else cam_intr.dist_coeffs.tolist(),
-                "width": cam_intr.width,
-                "height": cam_intr.height,
-            }
+        # No --intrinsics-json and no CLI overrides: default to the factory
+        # multi-resolution table (patches/camera_insrinsics.json) so whatever
+        # --capture-width/--capture-height (or --resolution) was used gets matching
+        # intrinsics automatically, rather than silently reusing a fixed resolution's
+        # numbers at the wrong scale.
+        factory_by_res = load_factory_intrinsics_by_resolution(FACTORY_INTRINSICS_JSON)
+        if factory_by_res:
+            data = {"by_resolution": factory_by_res}
+            source_desc = str(FACTORY_INTRINSICS_JSON.relative_to(REPO_ROOT))
+        else:
+            # Factory table missing: fall back to the single scene_rgb resolution
+            # already calibrated in patches/assets.py.
+            cam_intr = DEFAULT_ASSETS.camera().intrinsics
+            if cam_intr.is_filled():
+                data = {
+                    "fx": cam_intr.fx,
+                    "fy": cam_intr.fy,
+                    "cx": cam_intr.cx,
+                    "cy": cam_intr.cy,
+                    "dist_coeffs": None if cam_intr.dist_coeffs is None else cam_intr.dist_coeffs.tolist(),
+                    "width": cam_intr.width,
+                    "height": cam_intr.height,
+                }
+                source_desc = "patches/assets.py (DEFAULT_ASSETS scene_rgb)"
 
     by_res = data.get("by_resolution")
     if by_res:
         if args.resolution:
             key = args.resolution
             if key not in by_res:
-                raise ValueError(f"resolution '{key}' not in {args.intrinsics_json}'s by_resolution: {list(by_res)}")
+                raise ValueError(f"resolution '{key}' not in {source_desc}'s by_resolution: {list(by_res)}")
         elif len(by_res) == 1:
             key = next(iter(by_res))
         else:
             raise ValueError(
-                f"{args.intrinsics_json} has multiple resolutions {list(by_res)}; pick one with --resolution WxH"
+                f"{source_desc} has multiple resolutions {list(by_res)}; pick one with --resolution WxH "
+                "(auto-set from --capture-width/--capture-height when --capture is used, or from the "
+                "first --images frame's actual pixel size otherwise)."
             )
         data = by_res[key]
 
@@ -149,7 +248,7 @@ def load_intrinsics(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarray, d
         "dist_coeffs": dist_arr.flatten().tolist(),
         "width": data.get("width"),
         "height": data.get("height"),
-        "source_json": args.intrinsics_json or "patches/assets.py (DEFAULT_ASSETS scene_rgb)",
+        "source_json": source_desc,
     }
     return K, dist_arr, meta
 
@@ -206,7 +305,25 @@ def get_aruco_dictionary(family: str):
     raise ValueError(f"Unknown tag family '{family}'. Available: {available}")
 
 
-def make_aruco_detector(dictionary):
+# Empirically determined for the current printed tag batch (verified by comparing
+# annotate_apriltags.py's numbered corner overlay against which physical corner
+# collect_apriltag_corners.py's operator actually touches): cv2.aruco's raw per-marker
+# corner order for these tags is [bottom_right, bottom_left, top_left, top_right], NOT
+# the textbook "clockwise from top_left" order docs describe. That means the tags'
+# print/generation happened to place the algorithm's rotation-invariant first corner at
+# what a human viewing the tag right-side-up would call the bottom-right -- i.e. this is
+# a property of this specific print batch, not of cv2.aruco in general. This permutes
+# raw index -> our [top_left, top_right, bottom_right, bottom_left] convention (index 0 =
+# the corner the operator physically touches), matching what corners_from_top_left /
+# solve_joint_pose_and_yaws / solve_axis_aligned_pose all assume. If tags are reprinted
+# or a different family/generator is used, re-verify with annotate_apriltags.py (its
+# red-dot label = index 0 after this reorder) before trusting this constant again.
+ARUCO_CORNER_REORDER = [2, 3, 0, 1]
+
+
+def make_aruco_detect_fn(family: str):
+    """cv2.aruco path -- only covers the families OpenCV bundles: 16h5/25h9/36h10/36h11."""
+    dictionary = get_aruco_dictionary(family)
     if hasattr(cv2.aruco, "DetectorParameters"):
         params = cv2.aruco.DetectorParameters()
     else:
@@ -216,17 +333,111 @@ def make_aruco_detector(dictionary):
 
     if hasattr(cv2.aruco, "ArucoDetector"):
         detector = cv2.aruco.ArucoDetector(dictionary, params)
-        return lambda gray: detector.detectMarkers(gray)
-    return lambda gray: cv2.aruco.detectMarkers(gray, dictionary, parameters=params)
+        raw_detect = lambda gray: detector.detectMarkers(gray)
+    else:
+        raw_detect = lambda gray: cv2.aruco.detectMarkers(gray, dictionary, parameters=params)
+
+    def detect(gray: np.ndarray) -> dict[int, np.ndarray]:
+        corners, ids, _ = raw_detect(gray)
+        result: dict[int, np.ndarray] = {}
+        if ids is not None:
+            for c, i in zip(corners, ids.flatten()):
+                raw = c.reshape(4, 2).astype(np.float64)
+                result[int(i)] = raw[ARUCO_CORNER_REORDER]
+        return result
+
+    return detect
 
 
-def detect_apriltags(gray: np.ndarray, detect_fn) -> dict[int, np.ndarray]:
-    corners, ids, _ = detect_fn(gray)
-    result: dict[int, np.ndarray] = {}
-    if ids is not None:
-        for c, i in zip(corners, ids.flatten()):
-            result[int(i)] = c.reshape(4, 2).astype(np.float64)
+_PUPIL_FAMILY_ALIASES = {
+    "41h12": "tagStandard41h12",
+    "tag41h12": "tagStandard41h12",
+    "standard41h12": "tagStandard41h12",
+    "tagstandard41h12": "tagStandard41h12",
+}
+
+# Short names -> (backend, canonical name), so --tag-family takes the same kind of
+# plain "36h11" / "41h12" value regardless of which detector backend actually
+# handles it. cv2.aruco ships 16h5/25h9/36h10/36h11; everything else (41h12) falls
+# back to pupil_apriltags. Full names (DICT_APRILTAG_36h11, tagStandard41h12, ...)
+# still work directly too -- see make_detect_fn.
+TAG_FAMILY_SHORTCUTS: dict[str, tuple[str, str]] = {
+    "16h5": ("aruco", "DICT_APRILTAG_16h5"),
+    "25h9": ("aruco", "DICT_APRILTAG_25h9"),
+    "36h10": ("aruco", "DICT_APRILTAG_36h10"),
+    "36h11": ("aruco", "DICT_APRILTAG_36h11"),
+    "41h12": ("pupil", "tagStandard41h12"),
+}
+
+
+def make_pupil_apriltags_detect_fn(family: str):
+    """Fallback path for AprilTag families OpenCV's cv2.aruco doesn't ship -- notably
+    41h12 (default). Uses `pupil_apriltags`, a wrapper around the official AprilRobotics
+    C library, which supports the full family set."""
+    try:
+        from pupil_apriltags import Detector as PupilDetector
+    except ImportError as exc:
+        raise ImportError(
+            f"tag family '{family}' is not one of OpenCV's built-in DICT_APRILTAG_* families "
+            "(16h5/25h9/36h10/36h11) -- cv2.aruco does not ship 41h12. Install the "
+            "AprilRobotics-backed detector instead:\n\n    pip install pupil-apriltags\n"
+        ) from exc
+
+    pupil_family = _PUPIL_FAMILY_ALIASES.get(family.strip().lower(), family)
+    detector = PupilDetector(families=pupil_family)
+
+    def detect(gray: np.ndarray) -> dict[int, np.ndarray]:
+        detections = detector.detect(gray, estimate_tag_pose=False)
+        result: dict[int, np.ndarray] = {}
+        for det in detections:
+            # AprilTag reference lib order: counter-clockwise starting at the corner
+            # nearest the tag's own (bottom-left-when-upright) origin, i.e.
+            # [bottom_left, bottom_right, top_right, top_left] -- the reverse of
+            # OpenCV's aruco order. Reverse it so index 0 is top_left, matching
+            # collect_apriltag_corners.py's convention (and make_aruco_detect_fn above).
+            result[int(det.tag_id)] = np.asarray(det.corners, dtype=np.float64)[::-1]
+        return result
+
+    return detect
+
+
+def _detect_both_polarities(base_detect, gray: np.ndarray) -> dict[int, np.ndarray]:
+    """Both cv2.aruco and the AprilTag reference library only look for one fixed
+    polarity (dark border/bits on a light background) -- a tag printed as a
+    black/white negative is invisible to a single detect() call (border extraction
+    AND bit decoding are both polarity-dependent, not just "less reliable"). Try
+    the normal image and its color-inverted version and merge, so mixed-polarity
+    prints (some tags normal, some accidentally inverted) both work. Normal-polarity
+    detections win on an id collision (shouldn't happen for a correctly-decoded tag)."""
+    result = base_detect(gray)
+    inverted = base_detect(cv2.bitwise_not(gray))
+    for tag_id, corners in inverted.items():
+        result.setdefault(tag_id, corners)
     return result
+
+
+def make_detect_fn(family: str) -> tuple[object, str]:
+    """Pick the detector backend for --tag-family. A short name (16h5/25h9/36h10/36h11/
+    41h12) is looked up in TAG_FAMILY_SHORTCUTS; 36h10/36h11/25h9/16h5 route to cv2.aruco,
+    41h12 to pupil_apriltags (cv2.aruco doesn't ship it). Full names (DICT_APRILTAG_36h11,
+    tagStandard41h12, ...) also work directly, same routing rule (DICT_* -> aruco, else
+    -> pupil_apriltags). The returned detect_fn tries both normal and inverted polarity
+    (see _detect_both_polarities). Returns (detect_fn(gray) -> dict[tag_id, (4,2) corners
+    in top_left/top_right/bottom_right/bottom_left order], backend_name)."""
+    shortcut = TAG_FAMILY_SHORTCUTS.get(family.strip().lower())
+    if shortcut is not None:
+        backend, canonical = shortcut
+    elif family.upper().startswith("DICT_"):
+        backend, canonical = "aruco", family
+    else:
+        backend, canonical = "pupil", family
+
+    if backend == "aruco":
+        base = make_aruco_detect_fn(canonical)
+        return (lambda gray: _detect_both_polarities(base, gray)), f"opencv.aruco:{canonical}"
+    pupil_family = _PUPIL_FAMILY_ALIASES.get(canonical.strip().lower(), canonical)
+    base = make_pupil_apriltags_detect_fn(canonical)
+    return (lambda gray: _detect_both_polarities(base, gray)), f"pupil_apriltags:{pupil_family}"
 
 
 # ---------------------------------------------------------------------------
@@ -266,13 +477,8 @@ def solve_joint_pose_and_yaws(
     yaw_grid_step_deg: float = 15.0,
 ) -> tuple[np.ndarray, np.ndarray, dict[int, float], float]:
     """Jointly solve camera pose (rvec, tvec) and each tag's yaw about +Z, given
-    only each tag's top_left corner (base frame) and its fixed side length.
-
-    Strategy: coarse grid search over yaw candidates x {+1,-1} chirality to find
-    a good starting point (avoids the local minima that a single continuous
-    optimizer could get stuck in), then scipy.optimize.least_squares polishes
-    camera pose + yaws jointly (chirality is discrete and stays fixed after the
-    grid search picks it).
+    only each tag's top_left corner (base frame) and its fixed side length. Scales
+    to any number of tags N (not just 2) -- see the two init strategies below.
 
     All tags lie in the same horizontal plane (same z), so the point set as a
     whole is exactly planar -- this makes the general 6-DOF pose ambiguous:
@@ -282,12 +488,36 @@ def solve_joint_pose_and_yaws(
     the table. We break that tie with the physical fact that this camera
     looks down at the table from above: candidates whose recovered camera
     z (base frame) is not above the tags' plane are rejected outright.
-    """
-    import itertools
 
+    Initial guess, N <= 2: 1-2 exact points can't constrain a 6-DOF pose by
+    themselves (need >=3 non-collinear points in general), so fall back to a
+    small combinatorial search over these tag(s)' own yaw x {+1,-1} chirality
+    (cheap at N<=2: len(yaw_grid)^N x 2, i.e. <=1152 evaluations at the default
+    15deg step -- this is the same search the old N-agnostic version of this
+    function did for every N, which is what made N>=4 impractically slow).
+
+    Initial guess, N >= 3: each tag's top_left corner is already an exact,
+    unambiguous 3D<->2D correspondence (no yaw involved) -- so a rough camera
+    pose can be solved directly from just the N top_left points via ordinary
+    PnP (cv2.solvePnPGeneric with SQPNP, which handles any N>=3 and returns
+    every candidate pose so the reflected-ambiguity twin can be filtered out
+    same as above), with no yaw search needed at all for this step. Holding
+    that pose fixed, each tag's yaw is then grid-searched independently
+    (O(N x len(yaw_grid)), not O(len(yaw_grid)^N)) against its own 4-point
+    reprojection error; the two global chirality options are compared by
+    their summed error across all tags and the better one is kept (chirality
+    is physically the same for every tag lying face-up under the same
+    camera, so it's not per-tag).
+
+    Either way, scipy.optimize.least_squares then polishes camera pose + all
+    N yaws together from that initial guess -- this stage is smooth/gradient
+    based and was always O(N), it's only the initial guess that used to be
+    combinatorial in N.
+    """
     from scipy.optimize import least_squares
 
     tag_ids = sorted(top_lefts.keys())
+    n_tags = len(tag_ids)
     image_points = np.concatenate([image_points_by_tag[t] for t in tag_ids], axis=0)
     tag_plane_z = float(np.mean([top_lefts[t][2] for t in tag_ids]))
 
@@ -301,27 +531,78 @@ def solve_joint_pose_and_yaws(
         return (-R_mat.T @ tvec.reshape(3, 1)).flatten()
 
     yaw_grid = np.deg2rad(np.arange(0.0, 360.0, yaw_grid_step_deg))
-    best = None  # (rmse, yaws, handedness, rvec, tvec)
-    for handedness in (1.0, -1.0):
-        for yaws in itertools.product(yaw_grid, repeat=len(tag_ids)):
-            obj = build_object_points(yaws, handedness)
-            try:
-                rvec, tvec, _ = solve_pnp(obj, image_points, K, dist, pnp_method, refine=False)
-            except RuntimeError:
-                continue
+
+    if n_tags <= 2:
+        # A pose can't be pinned down from 1-2 exact points alone (6 DOF, need >=3
+        # non-collinear points in general), so there's no cheaper bootstrap than
+        # searching this/these tag(s)' own yaw directly. Still cheap: len(yaw_grid)^n_tags
+        # x 2, i.e. <=1152 evaluations for n_tags<=2 at the default 15deg step.
+        import itertools
+
+        best = None  # (rmse, yaws, handedness, rvec, tvec)
+        for handedness in (1.0, -1.0):
+            for yaws in itertools.product(yaw_grid, repeat=n_tags):
+                obj = build_object_points(yaws, handedness)
+                try:
+                    rvec, tvec, _ = solve_pnp(obj, image_points, K, dist, pnp_method, refine=False)
+                except RuntimeError:
+                    continue
+                if camera_position_base(rvec, tvec)[2] <= tag_plane_z:
+                    continue  # camera below/at the table plane: the reflected-ambiguity twin, reject
+                _, _, rmse = reprojection_error(obj, image_points, K, dist, rvec, tvec)
+                if best is None or rmse < best[0]:
+                    best = (rmse, yaws, handedness, rvec, tvec)
+        if best is None:
+            raise RuntimeError(
+                f"pose+yaw search over {n_tags} tag(s) found no solution with the camera above the "
+                f"tags' plane (z > {tag_plane_z:.4f} m) -- check --tag-corners-base and the detected "
+                "tag ids."
+            )
+        _, yaws0, handedness, rvec0, tvec0 = best
+    else:
+        # Rough pose from the N top_left correspondences alone (exact points, no yaw
+        # needed) -- SQPNP handles any N>=3 (unlike EPNP, which needs N>=4).
+        # solvePnPGeneric returns every candidate root so the reflected twin (camera
+        # below the table) can be filtered out the same way as the N<=2 path.
+        top_left_obj = np.stack([top_lefts[t] for t in tag_ids], axis=0)
+        top_left_img = np.stack([image_points_by_tag[t][0] for t in tag_ids], axis=0)
+        ok, rvecs, tvecs, _ = cv2.solvePnPGeneric(top_left_obj, top_left_img, K, dist, flags=cv2.SOLVEPNP_SQPNP)
+        best_stage1 = None  # (rmse, rvec, tvec)
+        for rvec, tvec in zip(rvecs, tvecs):
             if camera_position_base(rvec, tvec)[2] <= tag_plane_z:
-                continue  # camera below/at the table plane: the reflected-ambiguity twin, reject
-            _, _, rmse = reprojection_error(obj, image_points, K, dist, rvec, tvec)
-            if best is None or rmse < best[0]:
-                best = (rmse, yaws, handedness, rvec, tvec)
+                continue
+            _, _, rmse = reprojection_error(top_left_obj, top_left_img, K, dist, rvec, tvec)
+            if best_stage1 is None or rmse < best_stage1[0]:
+                best_stage1 = (rmse, rvec, tvec)
+        if best_stage1 is None:
+            raise RuntimeError(
+                f"couldn't get an initial camera pose from the {n_tags} tags' top_left corners alone "
+                "with the camera above the tags' plane -- check --tag-corners-base and the detected "
+                "tag ids (tags nearly collinear or too few for a stable PnP solve can also cause this)."
+            )
+        _, rvec0, tvec0 = best_stage1
 
-    if best is None:
-        raise RuntimeError(
-            "joint pose+yaw grid search found no solution with the camera above the tags' plane "
-            f"(z > {tag_plane_z:.4f} m) -- check --tag-corners-base and the detected tag ids."
-        )
-
-    _, yaws0, handedness, rvec0, tvec0 = best
+        # Per tag, per global chirality: best yaw against that tag's own 4-point error,
+        # holding the stage-1 pose fixed. O(N x len(yaw_grid)), not O(len(yaw_grid)^N).
+        handedness_totals: dict[float, float] = {}
+        yaws_by_handedness: dict[float, list[float]] = {}
+        for handedness in (1.0, -1.0):
+            total_rmse = 0.0
+            yaws_for_h = []
+            for t in tag_ids:
+                img_t = image_points_by_tag[t]
+                best_tag = None  # (rmse, yaw)
+                for yaw in yaw_grid:
+                    obj_t = corners_from_top_left(top_lefts[t], size, yaw, handedness)
+                    _, _, rmse = reprojection_error(obj_t, img_t, K, dist, rvec0, tvec0)
+                    if best_tag is None or rmse < best_tag[0]:
+                        best_tag = (rmse, yaw)
+                total_rmse += best_tag[0]
+                yaws_for_h.append(best_tag[1])
+            handedness_totals[handedness] = total_rmse
+            yaws_by_handedness[handedness] = yaws_for_h
+        handedness = min(handedness_totals, key=handedness_totals.get)
+        yaws0 = yaws_by_handedness[handedness]
 
     def residuals(params: np.ndarray) -> np.ndarray:
         rvec = params[0:3]
@@ -356,13 +637,138 @@ def reprojection_error(
     return proj, per_point, rmse
 
 
-def draw_debug_image(img: np.ndarray, detections: dict[int, np.ndarray], proj_by_tag: dict[int, np.ndarray]) -> np.ndarray:
+# The 4 ways two perpendicular tag edges can align with the base frame's x/y axes --
+# "axis-aligned" alone doesn't say whether the top_left->top_right edge runs along +x or
+# +y, only that it runs along ONE of them. 0/180 put it along x, 90/270 along y; which
+# one is physically correct depends on how the table happens to be oriented relative to
+# the robot base frame (empirically 90 deg for this rig, not the 0 deg first assumed --
+# see corners_from_top_left: at yaw=pi/2, handedness=+1, top_right = top_left + (0,
+# +size, 0) and bottom_left = top_left + (+size, 0, 0), matching what was verified
+# against the physical tags). Searched automatically below rather than hardcoded, so
+# this doesn't need re-guessing if the rig's orientation convention changes again.
+AXIS_ALIGNED_YAW_CANDIDATES_DEG = [0.0, 90.0, 180.0, 270.0]
+
+
+def solve_axis_aligned_pose(
+    top_lefts: dict[int, np.ndarray],
+    tag_ids: list[int],
+    size: float,
+    image_points_by_tag: dict[int, np.ndarray],
+    K: np.ndarray,
+    dist: np.ndarray,
+    pnp_method: str,
+) -> tuple[np.ndarray, np.ndarray, float, float, float]:
+    """Alternative to solve_joint_pose_and_yaws for tags stuck down parallel to the
+    robot base's x/y axes ("水平竖直"): assume the same fixed cardinal yaw (0/90/180/270
+    deg -- see AXIS_ALIGNED_YAW_CANDIDATES_DEG) for every tag instead of solving each
+    tag's yaw independently, so top_right/bottom_right/bottom_left are computed directly
+    from the measured top_left corner by offsetting x/y by +-tag_size at the same z
+    (reuses corners_from_top_left with yaw fixed). This only holds if that physical
+    assumption is true -- if the tags are actually rotated off-axis on the table, this
+    method's computed corners are wrong and its reprojection error will be much higher
+    than solve_joint_pose_and_yaws's; compare the two before trusting this one.
+
+    No per-tag search needed since yaw is fixed (shared across all tags, unlike method
+    A): only which cardinal direction + chirality (which of the 2 axis-offset
+    directions is "right" vs "down") is ambiguous, so all 4 yaws x 2 chirality signs
+    (8 combos total, still O(1) in the number of tags) are tried via a direct PnP solve
+    each and the lower-RMSE one is kept. Returns (rvec, tvec, chirality, assumed_yaw_deg,
+    reprojection_rmse_px).
+    """
+    image_points = np.concatenate([image_points_by_tag[t] for t in tag_ids], axis=0)
+    best = None  # (rmse, handedness, yaw_deg, rvec, tvec)
+    for handedness in (1.0, -1.0):
+        for yaw_deg in AXIS_ALIGNED_YAW_CANDIDATES_DEG:
+            yaw = np.deg2rad(yaw_deg)
+            obj = np.concatenate([corners_from_top_left(top_lefts[t], size, yaw, handedness) for t in tag_ids], axis=0)
+            try:
+                rvec, tvec, _ = solve_pnp(obj, image_points, K, dist, pnp_method)
+            except RuntimeError:
+                continue
+            _, _, rmse = reprojection_error(obj, image_points, K, dist, rvec, tvec)
+            if best is None or rmse < best[0]:
+                best = (rmse, handedness, yaw_deg, rvec, tvec)
+    if best is None:
+        raise RuntimeError("axis-aligned PnP failed to converge for every yaw x chirality candidate")
+    rmse, handedness, yaw_deg, rvec, tvec = best
+    return rvec, tvec, handedness, yaw_deg, rmse
+
+
+def leave_one_out_tag_diagnostics(
+    top_lefts: dict[int, np.ndarray],
+    tag_ids: list[int],
+    size: float,
+    image_points_by_tag: dict[int, np.ndarray],
+    K: np.ndarray,
+    dist: np.ndarray,
+    pnp_method: str,
+    yaw_grid_step_deg: float,
+) -> dict[int, float | None]:
+    """For each tag, solve the camera pose from every OTHER tag alone, then measure how
+    well the excluded tag's own 4 points fit that externally-determined pose (best yaw
+    for just this one tag, holding the pose fixed). Requires >=3 tags total (so >=2
+    remain per exclusion for an unambiguous pose -- see solve_joint_pose_and_yaws).
+
+    This catches bad per-tag data (e.g. the physically touched corner not matching the
+    detector's corner 0, or a mismeasured top_left) that per-point residuals from the
+    FULL joint solve can miss: with N-1 good tags and 1 bad one, the shared least_squares
+    fit doesn't reject the bad tag, it quietly drags the whole camera pose to partially
+    accommodate it, smearing elevated error across every tag's own residuals instead of
+    concentrating it on the bad one (confirmed empirically -- a single bad anchor among 4
+    tags shifted the solved camera position by 300+mm while every tag's own per-point
+    reprojection error looked similarly unremarkable). Leave-one-out sidesteps this by
+    never letting a tag influence the pose used to judge it.
+
+    Returns {tag_id: rmse_px} for tags whose leave-one-out solve succeeded, or
+    {tag_id: None} when the remaining tags' pose solve itself failed (this can itself be
+    a symptom of a *different* excluded tag being bad -- a corrupted tag sitting in the
+    "rest" set for several other tags' checks can make those checks fail outright).
+    """
+    yaw_grid = np.deg2rad(np.arange(0.0, 360.0, yaw_grid_step_deg))
+    result: dict[int, float | None] = {}
+    for t in tag_ids:
+        rest = [x for x in tag_ids if x != t]
+        try:
+            rvec_r, tvec_r, _, _ = solve_joint_pose_and_yaws(
+                {x: top_lefts[x] for x in rest},
+                size,
+                {x: image_points_by_tag[x] for x in rest},
+                K,
+                dist,
+                pnp_method,
+                yaw_grid_step_deg,
+            )
+        except RuntimeError:
+            result[t] = None
+            continue
+        img_t = image_points_by_tag[t]
+        best_rmse = None
+        for handedness in (1.0, -1.0):
+            for yaw in yaw_grid:
+                obj_t = corners_from_top_left(top_lefts[t], size, yaw, handedness)
+                _, _, rmse = reprojection_error(obj_t, img_t, K, dist, rvec_r, tvec_r)
+                if best_rmse is None or rmse < best_rmse:
+                    best_rmse = rmse
+        result[t] = best_rmse
+    return result
+
+
+def draw_debug_image(
+    img: np.ndarray,
+    detections: dict[int, np.ndarray],
+    proj_by_tag: dict[int, np.ndarray],
+    proj_by_tag_axis_aligned: dict[int, np.ndarray] | None = None,
+) -> np.ndarray:
     vis = img.copy()
     for tag_id, corners in detections.items():
         pts = corners.astype(int)
         cv2.polylines(vis, [pts], True, (0, 255, 0), 2)
-        for x, y in pts:
+        # Corner index labels (0=top_left .. 3=bottom_left by this script's convention) --
+        # a quick visual sanity check that the detector backend's corner order matches
+        # what collect_apriltag_corners.py measured, especially when switching tag family.
+        for idx, (x, y) in enumerate(pts):
             cv2.circle(vis, (int(x), int(y)), 3, (0, 255, 0), -1)
+            cv2.putText(vis, str(idx), (int(x) + 4, int(y) - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
         cx, cy = pts.mean(axis=0).astype(int)
         cv2.putText(vis, f"id{tag_id} detected", (cx - 40, cy - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
     for tag_id, proj in proj_by_tag.items():
@@ -370,8 +776,132 @@ def draw_debug_image(img: np.ndarray, detections: dict[int, np.ndarray], proj_by
         cv2.polylines(vis, [pts], True, (0, 0, 255), 1)
         for x, y in pts:
             cv2.circle(vis, (int(x), int(y)), 3, (0, 0, 255), -1)
-    cv2.putText(vis, "green=detected  red=reprojected", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    if proj_by_tag_axis_aligned:
+        for tag_id, proj in proj_by_tag_axis_aligned.items():
+            pts = proj.astype(int)
+            cv2.polylines(vis, [pts], True, (0, 200, 255), 1)  # orange, BGR
+            for x, y in pts:
+                cv2.circle(vis, (int(x), int(y)), 3, (0, 200, 255), -1)
+    legend = "green=detected  red=yaw-solve reprojected"
+    if proj_by_tag_axis_aligned:
+        legend += "  orange=axis-aligned reprojected"
+    cv2.putText(vis, legend, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+    cv2.putText(vis, "digits=corner idx (0=top_left)", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
     return vis
+
+
+# ---------------------------------------------------------------------------
+# Photo capture (--capture): take a fresh frame instead of/in addition to
+# pointing --images at existing photo(s)
+# ---------------------------------------------------------------------------
+
+
+def capture_images(args: argparse.Namespace, out_dir: Path) -> list[Path]:
+    capture_dir = out_dir / "captured"
+    capture_dir.mkdir(parents=True, exist_ok=True)
+    if args.capture_backend == "realsense":
+        return _capture_realsense(args, capture_dir)
+    return _capture_opencv(args, capture_dir)
+
+
+def _list_realsense_color_profiles(rs) -> str:
+    lines = []
+    for dev in rs.context().query_devices():
+        lines.append(f"  device {dev.get_info(rs.camera_info.serial_number)} ({dev.get_info(rs.camera_info.name)}):")
+        seen = set()
+        for sensor in dev.query_sensors():
+            for p in sensor.get_stream_profiles():
+                if p.stream_type() != rs.stream.color:
+                    continue
+                vp = p.as_video_stream_profile()
+                key = (vp.width(), vp.height(), vp.fps())
+                if key in seen:
+                    continue
+                seen.add(key)
+        for w, h, fps in sorted(seen, key=lambda k: (-k[0] * k[1], -k[2])):
+            lines.append(f"    {w}x{h}@{fps}")
+    return "\n".join(lines) if lines else "  (no RealSense devices found)"
+
+
+def _capture_realsense(args: argparse.Namespace, capture_dir: Path) -> list[Path]:
+    try:
+        import pyrealsense2 as rs
+    except ImportError as exc:
+        raise ImportError(
+            "--capture --capture-backend realsense needs pyrealsense2: pip install pyrealsense2 "
+            "(or pass --capture-backend opencv for a plain UVC camera)"
+        ) from exc
+
+    pipeline = rs.pipeline()
+    config = rs.config()
+    if args.camera_serial != "auto":
+        config.enable_device(args.camera_serial)
+    config.enable_stream(rs.stream.color, args.capture_width, args.capture_height, rs.format.bgr8, args.capture_fps)
+
+    try:
+        profile = pipeline.start(config)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"RealSense couldn't start a {args.capture_width}x{args.capture_height}@{args.capture_fps} "
+            f"color stream ({exc}). That resolution/fps combo likely isn't supported by this camera "
+            f"-- supported color profiles:\n{_list_realsense_color_profiles(rs)}\n"
+            "Pick a supported combo with --capture-width/--capture-height/--capture-fps."
+        ) from exc
+    paths: list[Path] = []
+    try:
+        serial = profile.get_device().get_info(rs.camera_info.serial_number)
+        print(
+            f"[capture] RealSense {serial} @ {args.capture_width}x{args.capture_height}@{args.capture_fps} -- "
+            f"warming up {args.capture_warmup_frames} frames ..."
+        )
+        for _ in range(args.capture_warmup_frames):
+            pipeline.wait_for_frames(3000)
+        for i in range(args.capture_count):
+            frames = pipeline.wait_for_frames(3000)
+            color = frames.get_color_frame()
+            if not color:
+                raise RuntimeError("RealSense pipeline returned no color frame")
+            image = np.asanyarray(color.get_data())
+            path = capture_dir / f"capture_{i:02d}.png"
+            cv2.imwrite(str(path), image)
+            print(f"[capture] wrote {path}")
+            paths.append(path)
+            if i + 1 < args.capture_count:
+                time.sleep(args.capture_interval)
+    finally:
+        pipeline.stop()
+    return paths
+
+
+def _capture_opencv(args: argparse.Namespace, capture_dir: Path) -> list[Path]:
+    from platform import system
+
+    backend = cv2.CAP_DSHOW if system() == "Windows" else cv2.CAP_ANY
+    cap = cv2.VideoCapture(args.camera_index, backend)
+    if not cap.isOpened():
+        raise RuntimeError(f"failed to open camera index {args.camera_index}")
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.capture_width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.capture_height)
+    cap.set(cv2.CAP_PROP_FPS, args.capture_fps)
+
+    paths: list[Path] = []
+    try:
+        print(f"[capture] opencv camera {args.camera_index} -- warming up {args.capture_warmup_frames} frames ...")
+        for _ in range(args.capture_warmup_frames):
+            cap.read()
+        for i in range(args.capture_count):
+            ok, image = cap.read()
+            if not ok or image is None:
+                raise RuntimeError("camera returned no frame")
+            path = capture_dir / f"capture_{i:02d}.png"
+            cv2.imwrite(str(path), image)
+            print(f"[capture] wrote {path}")
+            paths.append(path)
+            if i + 1 < args.capture_count:
+                time.sleep(args.capture_interval)
+    finally:
+        cap.release()
+    return paths
 
 
 # ---------------------------------------------------------------------------
@@ -386,12 +916,29 @@ def calibrate(args: argparse.Namespace) -> None:
     if not args.no_debug_images:
         debug_dir.mkdir(parents=True, exist_ok=True)
 
+    captured_paths: list[Path] = []
+    if args.capture:
+        captured_paths = capture_images(args, out_dir)
+        if args.resolution is None:
+            args.resolution = f"{args.capture_width}x{args.capture_height}"
+
+    image_paths = [as_abs(p) for p in args.images] + captured_paths
+    if not image_paths:
+        raise ValueError("no input images: pass --images, --capture, or both")
+
+    if args.resolution is None:
+        # Not set by --capture above (plain --images run) -- infer from the first
+        # image's actual pixel size so load_intrinsics() picks matching factory
+        # intrinsics without the user having to spell out --resolution by hand.
+        peek = cv2.imread(str(image_paths[0]))
+        if peek is not None:
+            h, w = peek.shape[:2]
+            args.resolution = f"{w}x{h}"
+
     K, dist, intrinsics_meta = load_intrinsics(args)
     top_lefts, tag_size, tags_meta = load_tag_top_left_base(args.tag_corners_base, args.tag_size_m)
-    dictionary = get_aruco_dictionary(args.tag_family)
-    detect_fn = make_aruco_detector(dictionary)
+    detect_fn, detector_backend = make_detect_fn(args.tag_family)
 
-    image_paths = [as_abs(p) for p in args.images]
     per_tag_pixels: dict[int, list[tuple[str, np.ndarray]]] = {}
     per_image_data: list[dict] = []
 
@@ -399,8 +946,16 @@ def calibrate(args: argparse.Namespace) -> None:
         img = cv2.imread(str(path))
         if img is None:
             raise FileNotFoundError(f"failed to read image: {path}")
+        img_h, img_w = img.shape[:2]
+        if intrinsics_meta.get("width") and intrinsics_meta.get("height"):
+            if (intrinsics_meta["width"], intrinsics_meta["height"]) != (img_w, img_h):
+                print(
+                    f"[warn] {path.name}: image is {img_w}x{img_h} but intrinsics are for "
+                    f"{intrinsics_meta['width']}x{intrinsics_meta['height']} -- fx/fy/cx/cy won't "
+                    "match this frame's scale; pass --resolution or --intrinsics-json explicitly."
+                )
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        detections = detect_apriltags(gray, detect_fn)
+        detections = detect_fn(gray)
         for tag_id, corners in detections.items():
             if tag_id in top_lefts:
                 per_tag_pixels.setdefault(tag_id, []).append((str(path), corners))
@@ -412,8 +967,9 @@ def calibrate(args: argparse.Namespace) -> None:
         raise RuntimeError(f"No known tags (ids {sorted(top_lefts.keys())}) were detected in any input image.")
     if len(tags_used) < 2:
         print(
-            f"[warn] only tag(s) {tags_used} detected; using a single planar tag (4 points) is "
-            "more prone to pose ambiguity than using both tags (8 points)."
+            f"[warn] only tag {tags_used[0]} detected; a single planar tag (4 points) is prone to "
+            "pose ambiguity (near-zero reprojection error at the wrong camera pose) -- add more "
+            "tags (--tag-corners-base / -n on collect_apriltag_corners.py) to fix this."
         )
 
     image_points_by_tag: dict[int, np.ndarray] = {}
@@ -437,16 +993,90 @@ def calibrate(args: argparse.Namespace) -> None:
     image_points = np.concatenate([image_points_by_tag[t] for t in tags_used], axis=0)
     _, per_point_err, rmse_px = reprojection_error(object_points, image_points, K, dist, rvec, tvec)
 
+    # Diagnostic: leave-one-out consistency check, catches bad per-tag data (e.g. the
+    # physically touched corner not matching the detector's corner 0) that the full
+    # joint solve's own per-point residuals can miss -- see leave_one_out_tag_diagnostics'
+    # docstring for why. Only meaningful with >=3 tags (need >=2 left per exclusion).
+    loo_rmse_by_tag: dict[int, float | None] = {}
+    suspect_tags: list[int] = []
+    if len(tags_used) >= 3:
+        loo_rmse_by_tag = leave_one_out_tag_diagnostics(
+            used_top_lefts, tags_used, tag_size, image_points_by_tag, K, dist, args.pnp_method, args.yaw_grid_step_deg
+        )
+        successful = {t: v for t, v in loo_rmse_by_tag.items() if v is not None}
+        failed = [t for t, v in loo_rmse_by_tag.items() if v is None]
+        if successful:
+            med = float(np.median(list(successful.values())))
+            suspect_tags = [t for t, v in successful.items() if v > 3.0 * med and v > 3.0]
+        if suspect_tags:
+            print(
+                f"[warn] tag(s) {suspect_tags}: leave-one-out check -- this tag's data doesn't fit "
+                "the camera pose solved from every OTHER tag nearly as well as the other tags do "
+                "(see suspect_anchor_tags / per-tag leave-one-out RMSE in the output JSON). Likely the "
+                "physically touched corner doesn't match the detector's corner 0, or that tag's "
+                "top_left was mismeasured. Re-check with annotate_apriltags.py's red-dot-labeled "
+                "corner 0 and re-collect that tag with collect_apriltag_corners.py."
+            )
+        if failed:
+            print(
+                f"[warn] tag(s) {failed}: leave-one-out pose solve failed when this tag was held out "
+                "-- the REMAINING tags' data (which does include a possibly-bad tag, just not this "
+                "one) couldn't produce a valid camera-above-table pose. If a tag is also flagged above "
+                "as suspect, that's the more likely culprit; if not, check whether the remaining tags "
+                "are too close to collinear."
+            )
+
     R_mat, _ = cv2.Rodrigues(rvec)
     T_base_in_cam = np.eye(4, dtype=np.float64)
     T_base_in_cam[:3, :3] = R_mat
     T_base_in_cam[:3, 3] = tvec.flatten()
     T_cam_in_base = np.linalg.inv(T_base_in_cam)
 
-    # Per-image diagnostics: reproject the pooled solution into each raw frame,
-    # and (when a frame alone has >=4 points) solve PnP standalone to check
-    # consistency against the pooled result (large deltas usually mean the
-    # camera moved between shots or a frame's detection is bad).
+    # Second method for comparison: assume every tag shares the same fixed cardinal yaw
+    # (edges axis-aligned with the base frame -- "水平竖直", searched over 0/90/180/270
+    # deg) instead of solving each tag's yaw independently. Same tags/pixels/intrinsics,
+    # independent PnP solve -- see solve_axis_aligned_pose's docstring for when this
+    # assumption is (and isn't) valid.
+    rvec_aa, tvec_aa, handedness_aa, yaw_deg_aa, rmse_aa = solve_axis_aligned_pose(
+        used_top_lefts, tags_used, tag_size, image_points_by_tag, K, dist, args.pnp_method
+    )
+    yaw_aa = np.deg2rad(yaw_deg_aa)
+    R_mat_aa, _ = cv2.Rodrigues(rvec_aa)
+    T_base_in_cam_aa = np.eye(4, dtype=np.float64)
+    T_base_in_cam_aa[:3, :3] = R_mat_aa
+    T_base_in_cam_aa[:3, 3] = tvec_aa.flatten()
+    T_cam_in_base_aa = np.linalg.inv(T_base_in_cam_aa)
+
+    method_position_delta_mm = float(
+        np.linalg.norm(T_cam_in_base[:3, 3] - T_cam_in_base_aa[:3, 3]) * 1000.0
+    )
+    method_rotation_delta_deg = float(
+        np.degrees((R.from_matrix(R_mat).inv() * R.from_matrix(R_mat_aa)).magnitude())
+    )
+
+    # Per-tag, per-corner base-frame 3D comparison: both methods compute
+    # top_right/bottom_right/bottom_left from the same measured top_left point and
+    # tag_size -- they only disagree on yaw (solved independently per-tag for method A,
+    # one shared fixed cardinal value for every tag for method B), so this is pure
+    # geometry, independent of the camera solve above. top_left itself is identical
+    # (it's the measured input, not derived) so its delta is always 0; the other 3
+    # corners show directly how far off the axis-aligned assumption is, in the base frame.
+    corner_labels = ["top_left", "top_right", "bottom_right", "bottom_left"]
+    tag_corners_by_method: dict[str, dict[int, dict[str, list[float]]]] = {"yaw_solve": {}, "axis_aligned": {}}
+    tag_corners_delta_mm: dict[int, dict[str, float]] = {}
+    for t in tags_used:
+        obj_y = corners_from_top_left(used_top_lefts[t], tag_size, np.deg2rad(yaw_by_tag[t]), handedness)
+        obj_a = corners_from_top_left(used_top_lefts[t], tag_size, yaw_aa, handedness_aa)
+        tag_corners_by_method["yaw_solve"][t] = {lbl: obj_y[i].tolist() for i, lbl in enumerate(corner_labels)}
+        tag_corners_by_method["axis_aligned"][t] = {lbl: obj_a[i].tolist() for i, lbl in enumerate(corner_labels)}
+        tag_corners_delta_mm[t] = {
+            lbl: float(np.linalg.norm(obj_y[i] - obj_a[i]) * 1000.0) for i, lbl in enumerate(corner_labels)
+        }
+
+    # Per-image diagnostics: reproject both methods' solutions into each raw frame,
+    # and (when a frame alone has >=4 points) solve PnP standalone against the
+    # yaw-solve method to check consistency with the pooled result (large deltas
+    # usually mean the camera moved between shots or a frame's detection is bad).
     r_global = R.from_matrix(R_mat)
     per_image_diag = []
     for entry in per_image_data:
@@ -467,10 +1097,17 @@ def calibrate(args: argparse.Namespace) -> None:
         img_here = np.concatenate([known[tid] for tid in sorted(known)], axis=0)
         proj_here, _, rmse_here = reprojection_error(obj_here, img_here, K, dist, rvec, tvec)
 
+        obj_here_aa = np.concatenate(
+            [corners_from_top_left(used_top_lefts[tid], tag_size, yaw_aa, handedness_aa) for tid in sorted(known)],
+            axis=0,
+        )
+        proj_here_aa, _, rmse_here_aa = reprojection_error(obj_here_aa, img_here, K, dist, rvec_aa, tvec_aa)
+
         diag = {
             "image": str(path),
             "tags_detected": sorted(known.keys()),
             "reprojection_rmse_px": rmse_here,
+            "reprojection_rmse_px_axis_aligned": rmse_here_aa,
             "standalone_rotation_delta_deg": None,
             "standalone_translation_delta_mm": None,
         }
@@ -488,17 +1125,20 @@ def calibrate(args: argparse.Namespace) -> None:
 
         if not args.no_debug_images:
             proj_by_tag = {}
+            proj_by_tag_aa = {}
             offset = 0
             for tid in sorted(known):
                 proj_by_tag[tid] = proj_here[offset : offset + 4]
+                proj_by_tag_aa[tid] = proj_here_aa[offset : offset + 4]
                 offset += 4
-            vis = draw_debug_image(entry["img"], detections, proj_by_tag)
+            vis = draw_debug_image(entry["img"], detections, proj_by_tag, proj_by_tag_aa)
             out_name = f"{path.stem}_reprojection.png"
             cv2.imwrite(str(debug_dir / out_name), vis)
 
     metadata = {
         "images": [str(p) for p in image_paths],
         "tag_family": args.tag_family,
+        "tag_detector_backend": detector_backend,
         "tag_corners_base_source": args.tag_corners_base,
         "tags_meta": tags_meta,
         "tag_size_m": tag_size,
@@ -513,6 +1153,8 @@ def calibrate(args: argparse.Namespace) -> None:
         "reprojection_rmse_px": rmse_px,
         "per_point_reprojection_error_px": per_point_err.tolist(),
         "per_tag_pixel_detection_std_px": per_tag_pixel_std,
+        "leave_one_out_rmse_px_by_tag": loo_rmse_by_tag,
+        "suspect_tags": suspect_tags,
         "per_image_diagnostics": per_image_diag,
     }
 
@@ -521,6 +1163,37 @@ def calibrate(args: argparse.Namespace) -> None:
         "T_cam_in_base": matrix_record(T_cam_in_base),
         "T_base_in_cam": matrix_record(T_base_in_cam),
         "camera_position_in_base_m": T_cam_in_base[:3, 3].tolist(),
+        "axis_aligned_method": {
+            "description": "Comparison method: same fixed cardinal yaw (searched over 0/90/180/270 "
+            "deg) for every tag instead of solved per-tag (assumes tags stuck down parallel to the "
+            "base x/y axes) -- see solve_axis_aligned_pose.",
+            "assumed_yaw_deg": yaw_deg_aa,
+            "chirality": handedness_aa,
+            "reprojection_rmse_px": rmse_aa,
+            "T_cam_in_base": matrix_record(T_cam_in_base_aa),
+            "T_base_in_cam": matrix_record(T_base_in_cam_aa),
+            "camera_position_in_base_m": T_cam_in_base_aa[:3, 3].tolist(),
+        },
+        "method_comparison": {
+            "position_delta_mm": method_position_delta_mm,
+            "rotation_delta_deg": method_rotation_delta_deg,
+            "reprojection_rmse_delta_px": rmse_aa - rmse_px,
+            "note": "delta = axis_aligned_method minus the primary (yaw-solve) T_cam_in_base above. "
+            "A small delta here is evidence the axis-aligned assumption holds for this rig; a large "
+            "one means the tags aren't actually axis-aligned and yaw-solve (the primary result) "
+            "should be trusted instead.",
+        },
+        "tag_corners_base_by_method": {
+            "description": "Each tag's 4 corners in the robot base frame (meters), independently for "
+            "both methods -- pure geometry from the measured top_left + tag_size + (yaw, chirality), "
+            "not dependent on the camera solve. top_left is identical in both (it's the measured "
+            "input, not derived); delta_mm shows how far method B's top_right/bottom_right/bottom_left "
+            "computation drifts from method A's per tag.",
+            "corner_order": corner_labels,
+            "yaw_solve": {str(t): tag_corners_by_method["yaw_solve"][t] for t in tags_used},
+            "axis_aligned": {str(t): tag_corners_by_method["axis_aligned"][t] for t in tags_used},
+            "delta_mm": {str(t): tag_corners_delta_mm[t] for t in tags_used},
+        },
     }
 
     out_path = out_dir / "camera_extrinsics.json"
@@ -530,14 +1203,37 @@ def calibrate(args: argparse.Namespace) -> None:
     if not args.no_debug_images:
         print(f"Debug images in {debug_dir}")
     print(f"Tags used: {tags_used}  (missing/not detected: {tags_missing})")
-    print(f"Solved yaw per tag (deg): {yaw_by_tag}  chirality: {handedness:+.0f}")
     print(f"PnP method: {method_used}  correspondences: {object_points.shape[0]}")
-    print(f"Reprojection RMSE: {rmse_px:.3f} px")
-    print(f"Camera position in base frame (m): {T_cam_in_base[:3, 3].tolist()}")
+    print()
+    print("Method A (yaw-solve, primary/written to T_cam_in_base):")
+    print(f"  Solved yaw per tag (deg): {yaw_by_tag}  chirality: {handedness:+.0f}")
+    print(f"  Reprojection RMSE: {rmse_px:.3f} px")
+    print(f"  Camera position in base frame (m): {T_cam_in_base[:3, 3].tolist()}")
+    print("Method B (axis-aligned, same fixed cardinal yaw for every tag):")
+    print(f"  assumed yaw (deg): {yaw_deg_aa:.0f}  chirality: {handedness_aa:+.0f}")
+    print(f"  Reprojection RMSE: {rmse_aa:.3f} px")
+    print(f"  Camera position in base frame (m): {T_cam_in_base_aa[:3, 3].tolist()}")
+    print(
+        f"Method A vs B: position delta {method_position_delta_mm:.2f} mm, "
+        f"rotation delta {method_rotation_delta_deg:.3f} deg, "
+        f"RMSE delta {rmse_aa - rmse_px:+.3f} px"
+    )
+    print()
+    print("Per-tag corner base-frame coordinates (m), method A (yaw-solve) vs B (axis-aligned):")
+    for t in tags_used:
+        print(f"  tag {t}:")
+        for lbl in corner_labels:
+            py = tag_corners_by_method["yaw_solve"][t][lbl]
+            pa = tag_corners_by_method["axis_aligned"][t][lbl]
+            d = tag_corners_delta_mm[t][lbl]
+            py_s = "[" + ", ".join(f"{v:+.4f}" for v in py) + "]"
+            pa_s = "[" + ", ".join(f"{v:+.4f}" for v in pa) + "]"
+            print(f"    {lbl:13s} A={py_s}  B={pa_s}  delta={d:6.2f}mm")
     for diag in per_image_diag:
         if diag["standalone_rotation_delta_deg"] is not None:
             print(
-                f"  {Path(diag['image']).name}: rmse={diag['reprojection_rmse_px']:.3f}px "
+                f"  {Path(diag['image']).name}: rmse_A={diag['reprojection_rmse_px']:.3f}px "
+                f"rmse_B={diag['reprojection_rmse_px_axis_aligned']:.3f}px "
                 f"standalone_delta=({diag['standalone_rotation_delta_deg']:.3f}deg, "
                 f"{diag['standalone_translation_delta_mm']:.2f}mm)"
             )
@@ -545,10 +1241,49 @@ def calibrate(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Calibrate RealSense camera extrinsics (in robot base frame) from two AprilTags.",
+        description="Calibrate RealSense camera extrinsics (in robot base frame) from N AprilTags "
+        "(N >= 1, more tags reduces reprojection error).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--images", nargs="+", required=True, help="One or more RGB frames from the static camera.")
+    parser.add_argument(
+        "--images",
+        nargs="+",
+        default=[],
+        help="One or more existing RGB frames from the static camera. Optional if --capture is "
+        "given (in which case captured frame(s) are used in addition to any --images); "
+        "required otherwise.",
+    )
+    parser.add_argument(
+        "--capture",
+        action="store_true",
+        help="Take a fresh photo with the camera instead of (or in addition to) --images.",
+    )
+    parser.add_argument(
+        "--capture-backend",
+        choices=["realsense", "opencv"],
+        default="realsense",
+        help="Camera backend for --capture (default: realsense / pyrealsense2).",
+    )
+    parser.add_argument("--camera-serial", default="auto", help="RealSense serial for --capture-backend realsense.")
+    parser.add_argument("--camera-index", type=int, default=1, help="OpenCV camera index for --capture-backend opencv.")
+    parser.add_argument("--capture-width", type=int, default=1920)
+    parser.add_argument("--capture-height", type=int, default=1080)
+    parser.add_argument(
+        "--capture-fps",
+        type=int,
+        default=8,
+        help="Default 8: D435i's RGB sensor only supports 1920x1080 at up to 8fps (lower "
+        "resolutions support higher fps, e.g. 15 at 1280x720, 30 at 640x480). If "
+        "pipeline.start() fails, the error lists this device's supported width/height/fps combos.",
+    )
+    parser.add_argument("--capture-count", type=int, default=1, help="Number of frames to capture and average.")
+    parser.add_argument("--capture-interval", type=float, default=0.5, help="Seconds between frames when capture-count > 1.")
+    parser.add_argument(
+        "--capture-warmup-frames",
+        type=int,
+        default=30,
+        help="Frames to discard before capturing, so auto-exposure/white-balance settle.",
+    )
     parser.add_argument(
         "--tag-corners-base",
         required=True,
@@ -567,13 +1302,22 @@ def main() -> None:
         default=15.0,
         help="Coarse grid resolution (degrees) for the initial per-tag yaw search before local refinement.",
     )
-    parser.add_argument("--tag-family", default="DICT_APRILTAG_36h11")
+    parser.add_argument(
+        "--tag-family",
+        default="41h12",
+        help="Tag family (default: 41h12). Short names: 16h5/25h9/36h10/36h11 (cv2.aruco) or "
+        "41h12 (pupil_apriltags -- pip install pupil-apriltags; cv2.aruco doesn't ship it). "
+        "Full names (DICT_APRILTAG_36h11, tagStandard41h12, ...) also accepted.",
+    )
     parser.add_argument("--intrinsics-json", default=None, help="JSON with fx/fy/cx(ppx)/cy(ppy)/dist_coeffs(coeffs).")
     parser.add_argument(
         "--resolution",
         default=None,
-        help="Resolution key (e.g. '640x480') to select when --intrinsics-json has a top-level "
-        "'by_resolution' map with multiple entries. Not needed if it has only one.",
+        help="Resolution key (e.g. '1920x1080') to select from the intrinsics source's "
+        "by_resolution map (the factory patches/camera_insrinsics.json by default, or "
+        "--intrinsics-json's own map if given). Usually not needed: auto-set from "
+        "--capture-width/--capture-height when --capture is used, otherwise from the first "
+        "--images frame's actual pixel size.",
     )
     parser.add_argument("--fx", type=float, default=None)
     parser.add_argument("--fy", type=float, default=None)
@@ -584,6 +1328,8 @@ def main() -> None:
     parser.add_argument("--out", default="outputs/camera_extrinsics")
     parser.add_argument("--no-debug-images", action="store_true")
     args = parser.parse_args()
+    if not args.images and not args.capture:
+        parser.error("pass --images (existing photo(s)), --capture (take a new photo), or both")
     calibrate(args)
 
 

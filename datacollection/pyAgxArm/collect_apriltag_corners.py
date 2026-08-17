@@ -32,14 +32,23 @@
 闭合状态不同），必须换成对应的真实偏移，否则每个角点都会带一个系统性
 偏差，标定出来的相机外参会整体偏移。
 
+要采集几个 tag：用 -n/--num-tags（比如 -n 5 会依次采集 id 1..5），或者用
+--tag-ids 明确指定不连续的 id 列表（如果不知道桌上贴的是哪些 id，先用
+annotate_apriltags.py 拍照识别一下）。calibrate_realsense_extrinsic_from_
+apriltags.py 那边也已同步支持任意数量 n 的 tag 联合标定，tag 越多、标定的
+误差通常越小。
+
 用法（--out 默认直接写到 LifEgo/examples/calib/tag_corners_base.json，即下一步
 calibrate_realsense_extrinsic_from_apriltags.py 读取的位置，不用再手动复制；如需
 另存别处再传 --out 覆盖）：
-  # 主从臂模式（推荐，假设从臂已在跟随主臂运动）
-  python collect_apriltag_corners.py --tag-ids 1 2 --tcp-offset 0.13 --tag-size-m 0.05
+  # 主从臂模式（推荐，假设从臂已在跟随主臂运动）—— 采集 5 个 tag（id 1..5）
+  python collect_apriltag_corners.py -n 5 --tcp-offset 0.13 --tag-size-m 0.05
+
+  # 指定具体 id（不连续也可以）
+  python collect_apriltag_corners.py --tag-ids 1 3 7 --tcp-offset 0.13 --tag-size-m 0.05
 
   # 单臂零力拖动模式
-  python collect_apriltag_corners.py --tag-ids 1 2 --tcp-offset 0.13 --tag-size-m 0.05 --drag-teach
+  python collect_apriltag_corners.py -n 5 --tcp-offset 0.13 --tag-size-m 0.05 --drag-teach
 
 安全提示：--drag-teach 模式下机械臂会进入零力状态，手不扶住工具/末端可能因
 重力下坠，脚本会在进入该模式前提示确认。
@@ -74,7 +83,24 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("-f", "--firmware", default="v112", choices=["default", "v111", "v112"])
     p.add_argument("-c", "--channel", default=None, help="CAN channel (default: platform default)")
-    p.add_argument("--tag-ids", nargs="+", type=int, default=[1, 2], help="AprilTag ids to collect, in order.")
+    p.add_argument(
+        "-n",
+        "--num-tags",
+        type=int,
+        default=None,
+        help="How many tags to collect (n >= 1) -- more tags gives calibrate_realsense_extrinsic_"
+        "from_apriltags.py more correspondences and reduces its solved reprojection error. Shorthand "
+        "for --tag-ids 1 2 ... n (sequential ids starting at 1). Ignored if --tag-ids is given "
+        "explicitly. Default if neither is given: 2 (tag ids 1, 2).",
+    )
+    p.add_argument(
+        "--tag-ids",
+        nargs="+",
+        type=int,
+        default=None,
+        help="AprilTag ids to collect, in order (use annotate_apriltags.py first if you don't know "
+        "which ids are printed on your tags). Overrides --num-tags; its length becomes n.",
+    )
     p.add_argument(
         "--tag-size-m",
         type=float,
@@ -112,7 +138,17 @@ def parse_args() -> argparse.Namespace:
         help=f"Output JSON path. Defaults to {DEFAULT_OUT} (where "
         "calibrate_realsense_extrinsic_from_apriltags.py's --tag-corners-base example reads from).",
     )
-    return p.parse_args()
+    args = p.parse_args()
+
+    if args.tag_ids is not None:
+        if args.num_tags is not None and args.num_tags != len(args.tag_ids):
+            p.error(f"--num-tags {args.num_tags} doesn't match --tag-ids length {len(args.tag_ids)} ({args.tag_ids})")
+    else:
+        n = args.num_tags if args.num_tags is not None else 2
+        if n < 1:
+            p.error(f"--num-tags must be >= 1 (got {n})")
+        args.tag_ids = list(range(1, n + 1))
+    return args
 
 
 def build_config(firmware: str, channel: str | None) -> dict:

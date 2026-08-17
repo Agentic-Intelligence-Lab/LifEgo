@@ -227,9 +227,31 @@ def parse_args() -> argparse.Namespace:
     parser.set_defaults(camera=True)
     parser.add_argument(
         "--camera-backend",
-        choices=["opencv", "realsense"],
+        choices=["opencv", "realsense", "external"],
         default="opencv",
-        help="RGB capture backend (default: opencv / Orbbec Dabai UVC)",
+        help=(
+            "RGB capture backend (default: opencv / Orbbec Dabai UVC). "
+            "'external' talks to a persistent camera_idle_preview.py service "
+            "instead of opening the device itself -- see --camera-control-path."
+        ),
+    )
+    parser.add_argument(
+        "--camera-control-path",
+        type=Path,
+        default=None,
+        help="backend=external: control file shared with the persistent camera service",
+    )
+    parser.add_argument(
+        "--camera-status-path",
+        type=Path,
+        default=None,
+        help="backend=external: status file shared with the persistent camera service",
+    )
+    parser.add_argument(
+        "--camera-meta-path",
+        type=Path,
+        default=None,
+        help="backend=external: per-frame metadata file shared with the persistent camera service",
     )
     parser.add_argument(
         "--camera-index",
@@ -1071,6 +1093,114 @@ class RealSenseRGBRecorder:
                     encoder.wait()
 
 
+class ExternalCameraFeed:
+    """Talks to a persistent ``camera_idle_preview.py`` service instead of
+    opening the camera itself.
+
+    The GUI keeps that service running (and the camera open) for its whole
+    session; ``start()``/``stop()`` here just tell it to begin/finalize one
+    MP4 segment via a control file, so the device is never reopened around a
+    recording. Exposes the same ``latest()``/``detected_serial``/``stop()``
+    surface as ``OpenCVRGBRecorder``/``RealSenseRGBRecorder`` so ``main()``
+    does not need to know which one it has.
+    """
+
+    def __init__(
+        self,
+        control_path: Path,
+        status_path: Path,
+        meta_path: Path,
+        video_path: Path,
+        fps: int,
+    ) -> None:
+        self.control_path = control_path
+        self.status_path = status_path
+        self.meta_path = meta_path
+        self.video_path = video_path
+        self.fps = fps
+        self._detected_serial: Optional[str] = None
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._latest: Optional[dict[str, Any]] = None
+        self._meta_mtime_ns = 0
+        self._thread: Optional[threading.Thread] = None
+
+    @property
+    def detected_serial(self) -> Optional[str]:
+        return self._detected_serial
+
+    def _read_status(self) -> Optional[dict[str, Any]]:
+        try:
+            return json.loads(self.status_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def _wait_for_state(self, state: str, timeout: float) -> dict[str, Any]:
+        deadline = time.monotonic() + timeout
+        last: Optional[dict[str, Any]] = None
+        while time.monotonic() < deadline:
+            status = self._read_status()
+            if status is not None:
+                last = status
+                if status.get("error"):
+                    raise RuntimeError(f"camera service error: {status['error']}")
+                if status.get("state") == state:
+                    return status
+            time.sleep(0.02)
+        raise TimeoutError(
+            f"camera service did not reach state={state!r} within {timeout:.1f}s "
+            f"(last status: {last})"
+        )
+
+    def start(self, timeout: float = 20.0) -> None:
+        if not self.control_path.parent.exists():
+            self.control_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"cmd": "start", "video_path": str(self.video_path), "fps": self.fps}
+        temporary = self.control_path.with_suffix(self.control_path.suffix + ".tmp")
+        temporary.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(temporary, self.control_path)
+        status = self._wait_for_state("recording", timeout)
+        self._detected_serial = status.get("serial")
+        self._thread = threading.Thread(target=self._tail_meta_loop, daemon=True)
+        self._thread.start()
+
+    def _tail_meta_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                mtime_ns = self.meta_path.stat().st_mtime_ns
+            except OSError:
+                time.sleep(0.005)
+                continue
+            if mtime_ns != self._meta_mtime_ns:
+                self._meta_mtime_ns = mtime_ns
+                try:
+                    record = json.loads(self.meta_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    record = None
+                if record is not None:
+                    with self._lock:
+                        self._latest = record
+            time.sleep(0.005)
+
+    def latest(self) -> Optional[dict[str, Any]]:
+        with self._lock:
+            return None if self._latest is None else dict(self._latest)
+
+    def stop(self, timeout: float = 20.0) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+        payload = {"cmd": "stop"}
+        try:
+            temporary = self.control_path.with_suffix(self.control_path.suffix + ".tmp")
+            temporary.write_text(json.dumps(payload), encoding="utf-8")
+            os.replace(temporary, self.control_path)
+            self._wait_for_state("idle", timeout)
+        except Exception as exc:
+            print(f"warning: camera segment finalize wait failed: {exc}", flush=True)
+
+
 def _is_unix_epoch_seconds(timestamp_s: float) -> bool:
     """True if python-can timestamp looks like wall-clock Unix seconds.
 
@@ -1498,6 +1628,17 @@ def main() -> int:
     ):
         print("camera width/height/fps must be greater than zero", file=sys.stderr)
         return 2
+    if args.camera and args.camera_backend == "external" and (
+        args.camera_control_path is None
+        or args.camera_status_path is None
+        or args.camera_meta_path is None
+    ):
+        print(
+            "--camera-backend external requires --camera-control-path, "
+            "--camera-status-path and --camera-meta-path",
+            file=sys.stderr,
+        )
+        return 2
 
     output = args.output or default_output_path()
     output = output.expanduser().resolve()
@@ -1595,7 +1736,19 @@ def main() -> int:
         if args.camera:
             assert camera_video is not None
             try:
-                if args.camera_backend == "opencv":
+                if args.camera_backend == "external":
+                    camera_reader = ExternalCameraFeed(
+                        control_path=args.camera_control_path.expanduser().resolve(),
+                        status_path=args.camera_status_path.expanduser().resolve(),
+                        meta_path=args.camera_meta_path.expanduser().resolve(),
+                        video_path=camera_video,
+                        fps=args.camera_fps,
+                    )
+                    print(
+                        f"Connecting to persistent camera service via "
+                        f"{args.camera_control_path} ..."
+                    )
+                elif args.camera_backend == "opencv":
                     camera_reader = OpenCVRGBRecorder(
                         camera_index=args.camera_index,
                         width=args.camera_width,

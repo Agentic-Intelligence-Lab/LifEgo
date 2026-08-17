@@ -8,14 +8,19 @@ for i in $(ip -br link show type can | awk '{print $1}'); do
   echo -n "$i: "; ethtool -i $i 2>/dev/null | grep bus-info
 done
 
+
+sudo ip link set can0 down
+sudo ip link set can0 type can bitrate 1000000
+sudo ip link set can0 up
+
 # 2. 激活 can1（每次重启后需重做）
 sudo ip link set can1 down
 sudo ip link set can1 type can bitrate 1000000
 sudo ip link set can1 up
 
 # 3. 验证
-ip -details link show can1
-candump can1
+ip -details link show can0
+candump can0
 
 # 4. Python 连接（先 Ctrl+C 停掉 candump）
 python3 first_test.py
