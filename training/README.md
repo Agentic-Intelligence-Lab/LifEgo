@@ -29,6 +29,12 @@ other image inputs = zeros, mask false
 Actions are absolute next-frame EEF targets. No delta transform is applied,
 because quaternion deltas should not be represented by plain subtraction.
 
+The task prompt is:
+
+```text
+Place the black pillar in the plate.
+```
+
 ## Check Data
 
 Run from the OpenPI uv environment:
@@ -58,15 +64,44 @@ This writes:
 outputs/openpi_assets/nero_eef/local/nero_ego_ymq_eef/norm_stats.json
 ```
 
-## Train
+## Train Pi0.5 With PyTorch
 
-Low-memory LoRA fine-tuning is the default:
+Use this for the `model.safetensors` Pi0.5 checkpoint:
+
+```bash
+cd thirdparty/openpi
+
+uv run torchrun --standalone --nnodes=1 --nproc_per_node=2 \
+  ../../training/train_nero_eef_pytorch.py \
+  --model pi05 \
+  --pytorch-weight-path /mnt/data/szeluresearch/models/pi05_base \
+  --exp-name nero_eef_pi05_pytorch_v1 \
+  --batch-size 8 \
+  --num-workers 2 \
+  --num-train-steps 30000 \
+  --save-interval 1000 \
+  --overwrite
+```
+
+This expects:
+
+```text
+/mnt/data/szeluresearch/models/pi05_base/model.safetensors
+```
+
+OpenPI's PyTorch trainer currently runs full fine-tuning. LoRA is used only by
+the JAX entry point below.
+
+## Train Pi0.5 With JAX
+
+Use this only if you have the JAX `params/` checkpoint:
 
 ```bash
 cd thirdparty/openpi
 
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run python ../../training/train_nero_eef.py \
-  --exp-name nero_eef_lora_v1 \
+  --model pi05 \
+  --exp-name nero_eef_pi05_lora_v1 \
   --batch-size 16 \
   --num-workers 2 \
   --num-train-steps 30000 \
@@ -74,7 +109,30 @@ XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run python ../../training/train_nero_eef.p
   --overwrite
 ```
 
-The default model is `pi0_fast` with:
+The JAX checkpoint path is:
+
+```text
+$OPENPI_DATA_HOME/openpi-assets/checkpoints/pi05_base/params
+```
+
+## Train Pi0-FAST
+
+Pi0-FAST is still available with:
+
+```bash
+cd thirdparty/openpi
+
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run python ../../training/train_nero_eef.py \
+  --model pi0_fast \
+  --exp-name nero_eef_pi0_fast_lora_v1 \
+  --batch-size 16 \
+  --num-workers 2 \
+  --num-train-steps 30000 \
+  --save-interval 1000 \
+  --overwrite
+```
+
+The Pi0-FAST config uses:
 
 ```text
 action_dim = 8
@@ -87,4 +145,3 @@ Checkpoints are written under:
 ```text
 outputs/openpi_checkpoints/nero_eef/<exp-name>
 ```
-

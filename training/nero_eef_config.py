@@ -29,7 +29,7 @@ from training import nero_eef_policy
 
 DEFAULT_REPO_ID = "local/nero_ego_ymq_eef"
 DEFAULT_DATASET_ROOT = REPO_ROOT / "outputs" / "lerobot" / DEFAULT_REPO_ID
-DEFAULT_TASK_PROMPT = "follow the demonstrated end-effector motion"
+DEFAULT_TASK_PROMPT = "Place the black pillar in the plate."
 
 
 @dataclasses.dataclass(frozen=True)
@@ -79,6 +79,7 @@ def build_config(
     num_workers: int = 2,
     assets_base_dir: str | None = None,
     checkpoint_base_dir: str | None = None,
+    pytorch_weight_path: str | None = None,
     wandb_enabled: bool = False,
     overwrite: bool = False,
     resume: bool = False,
@@ -123,6 +124,7 @@ def build_config(
             base_config=openpi_config.DataConfig(prompt_from_task=True),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(checkpoint),
+        pytorch_weight_path=pytorch_weight_path,
         batch_size=batch_size,
         num_workers=num_workers,
         num_train_steps=num_train_steps,

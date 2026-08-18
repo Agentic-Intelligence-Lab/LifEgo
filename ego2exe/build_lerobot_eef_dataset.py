@@ -19,7 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EEF_REL = Path("robot_eef_scene_camera_axis_corrected") / "robot_eef_trajectory.json"
 DEFAULT_FRAMES_REL = Path("preprocess") / "all_data"
 DEFAULT_REPO_ID = "ymq/nero_ego_eef"
-DEFAULT_TASK = "follow the demonstrated end-effector motion"
+DEFAULT_TASK = "Place the black pillar in the plate."
 
 
 @dataclass(frozen=True)
