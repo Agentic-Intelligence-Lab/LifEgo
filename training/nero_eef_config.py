@@ -18,7 +18,6 @@ from typing_extensions import override
 
 import openpi.models.model as _model
 import openpi.models.pi0_config as pi0_config
-import openpi.models.pi0_fast as pi0_fast
 import openpi.training.config as openpi_config
 import openpi.training.optimizer as openpi_optimizer
 import openpi.training.weight_loaders as weight_loaders
@@ -27,9 +26,23 @@ import openpi.transforms as transforms
 from training import nero_eef_policy
 
 
-DEFAULT_REPO_ID = "local/nero_ego_ymq_eef"
+DEFAULT_REPO_ID = "local/nero_ego_stack_object_horizontal_eef"
 DEFAULT_DATASET_ROOT = REPO_ROOT / "outputs" / "lerobot" / DEFAULT_REPO_ID
 DEFAULT_TASK_PROMPT = "Place the black pillar in the plate."
+DEFAULT_TOTAL_FRAMES = 5950
+DEFAULT_TRAIN_EPOCHS = 2
+DEFAULT_BATCH_SIZE = 16
+
+
+def train_steps_for_epochs(
+    batch_size: int,
+    *,
+    total_frames: int = DEFAULT_TOTAL_FRAMES,
+    epochs: int = DEFAULT_TRAIN_EPOCHS,
+) -> int:
+    if batch_size <= 0:
+        raise ValueError(f"batch_size must be positive, got {batch_size}")
+    return (total_frames // batch_size) * epochs
 
 
 @dataclasses.dataclass(frozen=True)
@@ -70,10 +83,10 @@ def build_config(
     *,
     repo_id: str = DEFAULT_REPO_ID,
     exp_name: str = "nero_eef_debug",
-    model: str = "pi0_fast",
+    model: str = "pi05",
     low_mem: bool = True,
-    batch_size: int = 16,
-    num_train_steps: int = 30_000,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    num_train_steps: int = train_steps_for_epochs(DEFAULT_BATCH_SIZE),
     save_interval: int = 1000,
     log_interval: int = 100,
     num_workers: int = 2,
@@ -84,15 +97,7 @@ def build_config(
     overwrite: bool = False,
     resume: bool = False,
 ) -> openpi_config.TrainConfig:
-    if model == "pi0_fast":
-        model_config = pi0_fast.Pi0FASTConfig(
-            action_dim=nero_eef_policy.ACTION_DIM,
-            action_horizon=10,
-            max_token_len=180,
-            paligemma_variant="gemma_2b_lora" if low_mem else "gemma_2b",
-        )
-        checkpoint = "gs://openpi-assets/checkpoints/pi0_fast_base/params"
-    elif model == "pi0":
+    if model == "pi0":
         model_config = pi0_config.Pi0Config(
             action_dim=32,
             action_horizon=10,

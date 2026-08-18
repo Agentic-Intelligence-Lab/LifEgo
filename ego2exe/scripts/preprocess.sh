@@ -17,6 +17,8 @@ Environment overrides:
   GL_BACKEND            MuJoCo render backend for MP4 replay (default: egl)
   WILOR_PRETRAINED_DIR  WiLoR checkpoint/cache directory
   HAND_KEY              hand_r or hand_l (default: hand_r)
+  RUN_IK                1 runs mink IK (default: 1)
+  RUN_REPLAY            1 renders replay MP4s (default: 1)
 EOF
 }
 
@@ -39,6 +41,8 @@ OUT_ROOT="${2:-outputs/new_pipeline}"
 PY="${PY:-python}"
 GL_BACKEND="${GL_BACKEND:-egl}"
 HAND_KEY="${HAND_KEY:-hand_r}"
+RUN_IK="${RUN_IK:-1}"
+RUN_REPLAY="${RUN_REPLAY:-1}"
 
 if [[ ! -f "${VIDEO}" ]]; then
   echo "Input video not found: ${VIDEO}" >&2
@@ -71,6 +75,8 @@ echo "video:      ${VIDEO_ABS}"
 echo "session:    ${SESSION_DIR}"
 echo "python:     ${PY}"
 echo "gl_backend: ${GL_BACKEND}"
+echo "run_ik:     ${RUN_IK}"
+echo "run_replay: ${RUN_REPLAY}"
 echo
 
 WILOR_ARGS=()
@@ -93,21 +99,33 @@ echo "=== 2/4 Export EEF trajectory ==="
 
 echo
 echo "=== 3/4 Retarget EEF with mink ==="
-"${PY}" ego2exe/retarget_with_mink.py \
-  --eef "${EEF_JSON}" \
-  --out "${IK_NPZ}"
+if [[ "${RUN_IK}" == "1" ]]; then
+  "${PY}" ego2exe/retarget_with_mink.py \
+    --eef "${EEF_JSON}" \
+    --out "${IK_NPZ}"
+else
+  echo "Skipping IK because RUN_IK=${RUN_IK}"
+fi
 
 echo
 echo "=== 4/4 Render replay MP4s ==="
-"${PY}" ego2exe/replay_eef_mujoco.py \
-  --eef "${EEF_JSON}" \
-  --out "${EEF_MP4}" \
-  --gl-backend "${GL_BACKEND}"
+if [[ "${RUN_REPLAY}" == "1" ]]; then
+  "${PY}" ego2exe/replay_eef_mujoco.py \
+    --eef "${EEF_JSON}" \
+    --out "${EEF_MP4}" \
+    --gl-backend "${GL_BACKEND}"
 
-"${PY}" ego2exe/replay_ik_mujoco.py \
-  --ik "${IK_NPZ}" \
-  --out "${IK_MP4}" \
-  --gl-backend "${GL_BACKEND}"
+  if [[ -f "${IK_NPZ}" ]]; then
+    "${PY}" ego2exe/replay_ik_mujoco.py \
+      --ik "${IK_NPZ}" \
+      --out "${IK_MP4}" \
+      --gl-backend "${GL_BACKEND}"
+  else
+    echo "Skipping IK replay because IK file is missing: ${IK_NPZ}"
+  fi
+else
+  echo "Skipping replay because RUN_REPLAY=${RUN_REPLAY}"
+fi
 
 echo
 echo "=== done ==="

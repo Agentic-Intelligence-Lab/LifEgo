@@ -14,15 +14,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from training.nero_eef_config import DEFAULT_DATASET_ROOT, build_config, dataset_home_from_root
+from training.nero_eef_config import DEFAULT_DATASET_ROOT, DEFAULT_REPO_ID, build_config, dataset_home_from_root
 from training.nero_eef_policy import ACTION_DIM
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--repo-id", default="local/nero_ego_ymq_eef")
+    parser.add_argument("--repo-id", default=DEFAULT_REPO_ID)
     parser.add_argument("--dataset-root", default=str(DEFAULT_DATASET_ROOT))
-    parser.add_argument("--model", choices=["pi0_fast", "pi0", "pi05"], default="pi0_fast")
+    parser.add_argument("--model", choices=["pi0", "pi05"], default="pi05")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--skip-norm-stats", action="store_true")

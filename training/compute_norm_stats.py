@@ -15,7 +15,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from training.nero_eef_config import DEFAULT_DATASET_ROOT, build_config, dataset_home_from_root
+from training.nero_eef_config import (
+    DEFAULT_DATASET_ROOT,
+    DEFAULT_REPO_ID,
+    build_config,
+    dataset_home_from_root,
+    train_steps_for_epochs,
+)
 from openpi import transforms
 
 
@@ -29,6 +35,9 @@ def compute(args: argparse.Namespace) -> None:
     from openpi.shared import normalize
     from openpi.training import data_loader
 
+    num_train_steps = args.num_train_steps
+    if num_train_steps is None:
+        num_train_steps = train_steps_for_epochs(args.batch_size)
     config = build_config(
         repo_id=args.repo_id,
         exp_name=args.exp_name,
@@ -36,7 +45,7 @@ def compute(args: argparse.Namespace) -> None:
         low_mem=not args.full_finetune,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
-        num_train_steps=args.num_train_steps,
+        num_train_steps=num_train_steps,
         wandb_enabled=False,
     )
     data_config = config.data.create(config.assets_dirs, config.model)
@@ -70,14 +79,19 @@ def compute(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--repo-id", default="local/nero_ego_ymq_eef")
+    parser.add_argument("--repo-id", default=DEFAULT_REPO_ID)
     parser.add_argument("--dataset-root", default=str(DEFAULT_DATASET_ROOT))
     parser.add_argument("--exp-name", default="nero_eef_debug")
-    parser.add_argument("--model", choices=["pi0_fast", "pi0", "pi05"], default="pi0_fast")
+    parser.add_argument("--model", choices=["pi0", "pi05"], default="pi05")
     parser.add_argument("--full-finetune", action="store_true")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-workers", type=int, default=2)
-    parser.add_argument("--num-train-steps", type=int, default=30_000)
+    parser.add_argument(
+        "--num-train-steps",
+        type=int,
+        default=None,
+        help="Defaults to two full passes over the dataset for the selected global batch size.",
+    )
     args = parser.parse_args()
     compute(args)
 

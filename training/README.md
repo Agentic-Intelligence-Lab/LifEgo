@@ -14,10 +14,10 @@ state/action = [x, y, z, qx, qy, qz, qw, gripper]
 The current dataset is:
 
 ```text
-outputs/lerobot/local/nero_ego_ymq_eef
+outputs/lerobot/local/nero_ego_stack_object_horizontal_eef
 ```
 
-It contains 10 episodes and 2017 frames.
+It contains 30 episodes and 5950 frames from `ymq`, `xule`, and `hyj`.
 
 Only ego RGB is used:
 
@@ -61,7 +61,7 @@ uv run python ../../training/compute_norm_stats.py \
 This writes:
 
 ```text
-outputs/openpi_assets/nero_eef/local/nero_ego_ymq_eef/norm_stats.json
+outputs/openpi_assets/nero_eef/local/nero_ego_stack_object_horizontal_eef/norm_stats.json
 ```
 
 ## Train Pi0.5 With PyTorch
@@ -80,10 +80,19 @@ uv run torchrun --standalone --nnodes=1 --nproc_per_node=2 \
   --exp-name nero_eef_pi05_pytorch_v1 \
   --batch-size 8 \
   --num-workers 2 \
-  --num-train-steps 30000 \
+  --num-train-steps 1486 \
   --save-interval 1000 \
   --loss-action-dim 8
 ```
+
+For the current dataset, two epochs with PyTorch global batch size 8 are:
+
+```text
+2 * floor(5950 frames / 8) = 1486 train steps
+```
+
+If `--num-train-steps` is omitted, the local training entry point computes this
+two-epoch value from the selected global batch size.
 
 This expects:
 
@@ -91,60 +100,11 @@ This expects:
 /mnt/data/szeluresearch/models/pi05_base/model.safetensors
 ```
 
-OpenPI's PyTorch trainer currently runs full fine-tuning. LoRA is used only by
-the JAX entry point below. The Pi0.5 model keeps the base 32D action head; Nero
-EEF data occupies the first 8 dimensions and OpenPI pads the rest. The local
-PyTorch entry point keeps the 32D shape for checkpoint compatibility, but its
-default `--loss-action-dim 8` setting crops the returned loss tensor so only the
-real EEF dimensions are supervised.
-
-## Train Pi0.5 With JAX
-
-Use this only if you have the JAX `params/` checkpoint:
-
-```bash
-cd thirdparty/openpi
-
-XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run python ../../training/train_nero_eef.py \
-  --model pi05 \
-  --exp-name nero_eef_pi05_lora_v1 \
-  --batch-size 16 \
-  --num-workers 2 \
-  --num-train-steps 30000 \
-  --save-interval 1000 \
-  --overwrite
-```
-
-The JAX checkpoint path is:
-
-```text
-$OPENPI_DATA_HOME/openpi-assets/checkpoints/pi05_base/params
-```
-
-## Train Pi0-FAST
-
-Pi0-FAST is still available with:
-
-```bash
-cd thirdparty/openpi
-
-XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run python ../../training/train_nero_eef.py \
-  --model pi0_fast \
-  --exp-name nero_eef_pi0_fast_lora_v1 \
-  --batch-size 16 \
-  --num-workers 2 \
-  --num-train-steps 30000 \
-  --save-interval 1000 \
-  --overwrite
-```
-
-The Pi0-FAST config uses:
-
-```text
-action_dim = 8
-action_horizon = 10
-max_token_len = 180
-```
+OpenPI's PyTorch trainer currently runs full fine-tuning. The Pi0.5 model keeps
+the base 32D action head; Nero EEF data occupies the first 8 dimensions and
+OpenPI pads the rest. The local PyTorch entry point keeps the 32D shape for
+checkpoint compatibility, but its default `--loss-action-dim 8` setting crops
+the returned loss tensor so only the real EEF dimensions are supervised.
 
 Checkpoints are written under:
 
