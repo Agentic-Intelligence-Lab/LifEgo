@@ -71,6 +71,8 @@ Use this for the `model.safetensors` Pi0.5 checkpoint:
 ```bash
 cd thirdparty/openpi
 
+rm -r ../../outputs/openpi_checkpoints/nero_eef/nero_eef_pi05_pytorch_v1 2>/dev/null || true
+
 uv run torchrun --standalone --nnodes=1 --nproc_per_node=2 \
   ../../training/train_nero_eef_pytorch.py \
   --model pi05 \
@@ -80,7 +82,7 @@ uv run torchrun --standalone --nnodes=1 --nproc_per_node=2 \
   --num-workers 2 \
   --num-train-steps 30000 \
   --save-interval 1000 \
-  --overwrite
+  --loss-action-dim 8
 ```
 
 This expects:
@@ -90,7 +92,11 @@ This expects:
 ```
 
 OpenPI's PyTorch trainer currently runs full fine-tuning. LoRA is used only by
-the JAX entry point below.
+the JAX entry point below. The Pi0.5 model keeps the base 32D action head; Nero
+EEF data occupies the first 8 dimensions and OpenPI pads the rest. The local
+PyTorch entry point keeps the 32D shape for checkpoint compatibility, but its
+default `--loss-action-dim 8` setting crops the returned loss tensor so only the
+real EEF dimensions are supervised.
 
 ## Train Pi0.5 With JAX
 

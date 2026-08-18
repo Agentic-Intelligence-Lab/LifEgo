@@ -94,7 +94,7 @@ def build_config(
         checkpoint = "gs://openpi-assets/checkpoints/pi0_fast_base/params"
     elif model == "pi0":
         model_config = pi0_config.Pi0Config(
-            action_dim=nero_eef_policy.ACTION_DIM,
+            action_dim=32,
             action_horizon=10,
             paligemma_variant="gemma_2b_lora" if low_mem else "gemma_2b",
             action_expert_variant="gemma_300m_lora" if low_mem else "gemma_300m",
@@ -103,7 +103,7 @@ def build_config(
     elif model == "pi05":
         model_config = pi0_config.Pi0Config(
             pi05=True,
-            action_dim=nero_eef_policy.ACTION_DIM,
+            action_dim=32,
             action_horizon=10,
             discrete_state_input=False,
             paligemma_variant="gemma_2b_lora" if low_mem else "gemma_2b",

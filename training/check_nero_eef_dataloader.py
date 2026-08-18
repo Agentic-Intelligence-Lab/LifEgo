@@ -8,11 +8,14 @@ import os
 from pathlib import Path
 import sys
 
+import numpy as np
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from training.nero_eef_config import DEFAULT_DATASET_ROOT, build_config, dataset_home_from_root
+from training.nero_eef_policy import ACTION_DIM
 
 
 def main() -> None:
@@ -51,6 +54,10 @@ def main() -> None:
         print(f"  {key}: {value.shape} {value.dtype} first={value[0]}")
     print(f"state: {observation.state.shape} {observation.state.dtype}")
     print(f"actions: {actions.shape} {actions.dtype}")
+    if observation.state.shape[-1] > ACTION_DIM:
+        print(f"state padded tail abs max: {np.abs(np.asarray(observation.state[..., ACTION_DIM:])).max():.6g}")
+    if actions.shape[-1] > ACTION_DIM:
+        print(f"actions padded tail abs max: {np.abs(np.asarray(actions[..., ACTION_DIM:])).max():.6g}")
 
 
 if __name__ == "__main__":

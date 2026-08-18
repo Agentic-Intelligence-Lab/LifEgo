@@ -17,9 +17,31 @@ if str(OPENPI_ROOT) not in sys.path:
     sys.path.insert(0, str(OPENPI_ROOT))
 
 from training.nero_eef_config import DEFAULT_DATASET_ROOT, build_config, dataset_home_from_root
+from training.nero_eef_policy import ACTION_DIM
 
 
 DEFAULT_PI05_WEIGHT_PATH = "/mnt/data/szeluresearch/models/pi05_base"
+
+
+def _patch_pytorch_action_loss_dim(loss_action_dim: int) -> None:
+    """Keep the 32D Pi0.5 head, but supervise only the real Nero EEF dims."""
+    if loss_action_dim <= 0:
+        return
+
+    from openpi.models_pytorch import pi0_pytorch
+
+    original_forward = pi0_pytorch.PI0Pytorch.forward
+    if getattr(original_forward, "_nero_eef_loss_patched", False):
+        return
+
+    def forward_with_cropped_loss(self, observation, actions, noise=None, time=None):
+        losses = original_forward(self, observation, actions, noise=noise, time=time)
+        if loss_action_dim >= losses.shape[-1]:
+            return losses
+        return losses[..., :loss_action_dim]
+
+    forward_with_cropped_loss._nero_eef_loss_patched = True
+    pi0_pytorch.PI0Pytorch.forward = forward_with_cropped_loss
 
 
 def main() -> None:
@@ -37,6 +59,12 @@ def main() -> None:
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--loss-action-dim",
+        type=int,
+        default=ACTION_DIM,
+        help="Only the first N action dimensions contribute to the PyTorch loss.",
+    )
     args = parser.parse_args()
 
     weight_path = Path(args.pytorch_weight_path).expanduser()
@@ -59,13 +87,15 @@ def main() -> None:
         overwrite=args.overwrite,
         resume=args.resume,
     )
+    if args.loss_action_dim > config.model.action_dim:
+        raise ValueError(f"--loss-action-dim={args.loss_action_dim} exceeds model action_dim={config.model.action_dim}")
 
     from scripts import train_pytorch as openpi_train_pytorch
 
     openpi_train_pytorch.init_logging()
+    _patch_pytorch_action_loss_dim(args.loss_action_dim)
     openpi_train_pytorch.train_loop(config)
 
 
 if __name__ == "__main__":
     main()
-
