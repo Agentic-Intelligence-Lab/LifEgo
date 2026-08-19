@@ -251,11 +251,11 @@ def solve_trajectory(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     add_common_args(parser, default_out="outputs/new_pipeline/ego_nero_easy/nero_eef_ik_mink/nero_eef_ik.npz")
-    parser.add_argument("--n-iter", type=int, default=80)
+    parser.add_argument("--n-iter", type=int, default=150)
     parser.add_argument("--dt", type=float, default=0.05)
     parser.add_argument("--solver", default="daqp")
-    parser.add_argument("--damping", type=float, default=1e-2)
-    parser.add_argument("--lm-damping", type=float, default=1e-2)
+    parser.add_argument("--damping", type=float, default=1.5e-1)
+    parser.add_argument("--lm-damping", type=float, default=1.5e-1)
     args = parser.parse_args()
     solve_trajectory(args)
 
