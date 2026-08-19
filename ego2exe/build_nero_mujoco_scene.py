@@ -121,7 +121,7 @@ def workspace_half_size_m() -> np.ndarray:
 def tcp_offset_m() -> np.ndarray:
     offset = assets_platform().tcp.t_flange_m
     if offset is None:
-        return np.array([0.13, 0.0, 0.0], dtype=np.float64)
+        return np.array([0.18, 0.0, 0.0], dtype=np.float64)
     offset = np.asarray(offset, dtype=np.float64)
     if offset.shape != (3,):
         raise ValueError("DEFAULT_ASSETS.platform.tcp.t_flange_m must be a 3-vector")

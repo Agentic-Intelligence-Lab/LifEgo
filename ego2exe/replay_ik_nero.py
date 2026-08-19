@@ -616,7 +616,7 @@ def parse_args() -> argparse.Namespace:
         "--tcp-offset-m",
         nargs=3,
         type=float,
-        default=(0.13, 0.0, 0.0),
+        default=(0.18, 0.0, 0.0),
         help="TCP offset in flange frame used by move_p prealignment",
     )
     parser.add_argument("--gripper", action="store_true", help="Also command AgxGripper width from gripper_width_m")

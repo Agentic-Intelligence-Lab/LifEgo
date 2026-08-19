@@ -35,11 +35,11 @@ export LD_LIBRARY_PATH=$(
 
 ```text
 R_tcp = R_flange
-p_tcp = p_flange + R_flange @ [0.13, 0, 0]    # link7 +X，朝夹爪尖端
+p_tcp = p_flange + R_flange @ [0.18, 0, 0]    # link7 +X，朝夹爪尖端（2026-08-18 由 0.13 修正为 0.18）
 ```
 
 与法兰、尖端在同一条线上。IK 跟踪的是该帧，**不是** JSONL 里控制器旧定义  
-`p = flange + R @ [0, 0, 0.13]`（法兰 +Z）。
+`p = flange + R @ [0, 0, 0.13]`（法兰 +Z，历史遗留定义，未变）。
 
 HumanEgo IK 输入使用**轴校正后**的 EEF：
 
@@ -315,7 +315,7 @@ Do not start viewer commands from an SSH session.
 `--execute` is set. It uses `move_j` rather than `move_js`; the pyAgxArm docs
 mark `move_js` as unsmoothed fast-response control and high risk.
 `--prealign-move-p` uses the IK file's first `target_pos_m` /
-`target_quat_xyzw` TCP target and the default TCP offset `[0.13, 0, 0]` to
+`target_quat_xyzw` TCP target and the default TCP offset `[0.18, 0, 0]` to
 compute the flange command for `move_p`.
 
 ## Retarget Solver Choice

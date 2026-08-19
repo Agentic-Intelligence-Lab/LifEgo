@@ -13,7 +13,9 @@ Convention notes (Nero setup, current pipeline):
   - Robot base: origin at table height under the arm; +z up; +x back, -x front;
     +y robot-right, -y robot-left.
   - Camera optical (OpenCV): +x image-right, +y image-down, +z optical forward.
-  - Tool-centric TCP: p_tcp = p_flange + R_flange @ [0.13, 0, 0] (link7 +X).
+  - Tool-centric TCP: p_tcp = p_flange + R_flange @ [0.18, 0, 0] (link7 +X).
+    UPDATED 2026-08-18: was 0.13 m, corrected to 0.18 m (measured flange->fingertip-midpoint
+    distance); see RobotPlatform.tcp.notes below.
 """
 
 from __future__ import annotations
@@ -235,10 +237,19 @@ NERO_TABLE_V1 = SceneAssets(
         workspace_center_m=None,
         workspace_half_size_m=None,
         tcp=TcpOffset(
-            t_flange_m=np.array([0.13, 0.0, 0.0]),
+            t_flange_m=np.array([0.18, 0.0, 0.0]),
             R_flange=None,
-            notes="Tool-centric TCP is flange +X 0.13 m in current MuJoCo scene; "
-            "controller JSONL historically used flange +Z 0.13 m. "
+            notes="UPDATED 2026-08-18: flange->TCP offset corrected from 0.13 m to 0.18 m "
+            "along flange +X (measured flange-to-fingertip-midpoint distance). Applied to "
+            "site:tcp in all three assets/mujoco_nero_scene/*.xml scenes and to the "
+            "prealign/move_p TCP-offset defaults in replay_ik_nero.py, "
+            "replay_ik_nero_move_p.py, and scripts/move_to_ego_hand1_first_eef.py. "
+            "Does NOT affect WiLoR hand reconstruction or preprocess_export_eef.py -- "
+            "hand2gripper.py derives the exported EEF target directly from the WiLoR "
+            "thumb-tip/index-tip midpoint, independent of this offset. "
+            "Prior value: flange +X 0.13 m in current MuJoCo scene; "
+            "controller JSONL historically used flange +Z 0.13 m (different axis, unrelated "
+            "legacy convention, left as-is). "
             "Verified against site:tcp with patches/view_nero_zero_pose_frames.py.",
         ),
         # Copied from existing pipeline defaults (solve_nero_eef_ik.py --gripper-open-m /
@@ -266,9 +277,9 @@ NERO_TABLE_V1 = SceneAssets(
             extrinsics=CameraExtrinsics(
                 T_cam_in_base=np.array(
                     [
-                        [-0.06640093907919233, 0.8931516773924303, -0.4448269286593267, -0.028984821637799026],
-                        [0.9976939458559392, 0.0657137003644242, -0.01698528736351997, -0.4375444455059773],
-                        [0.014060785604225665, -0.4449289727085697, -0.8954554726800706, 0.5648349184610941],
+                        [0.0019126414748474865, 0.899882260215229, -0.4361287190182733, -0.02234092009533033],
+                        [0.9999660903334242, -0.005214500777738002, -0.006373944220435028, -0.42835906594668127],
+                        [-0.00800999287608555, -0.436101738968753, -0.8998617189782855, 0.5620897634497561],
                         [0.0, 0.0, 0.0, 1.0],
                     ]
                 ),
@@ -276,15 +287,21 @@ NERO_TABLE_V1 = SceneAssets(
                 pitch_down_deg=None,
                 optical_projection_base=None,
                 camera_target_base=None,
-                notes="Solved by patches/calibrate_realsense_extrinsic_from_apriltags.py from "
-                "tags 1+2 top_left corners (examples/calib/tag_corners_base.json) + "
+                notes="UPDATED 2026-08-18: re-solved from le_ws/camera_extrinsics/"
+                "camera_extrinsics_0818_012.json (tags 0+1+2, yaw solved per-tag, sqpnp, "
+                "tag_size 0.0456 m), reprojection RMSE 1.269 px (vs. 1.012 px for the prior "
+                "solve below). camera_position_in_base_m = [-0.0223, -0.4284, 0.5621], a "
+                "~7-9 mm shift from the prior [-0.0290, -0.4375, 0.5648] -- small, consistent "
+                "with a re-calibration rather than the rig moving. NOTE: this new solve's "
+                "leave_one_out_rmse_px_by_tag for tag 0 is 15.6 px (tags 1/2 are 5.2/6.5 px) "
+                "-- tag 0 fits notably worse than the others though not flagged as suspect; "
+                "worth double-checking tag 0's corner measurement if this matters. "
+                "Previous solve (superseded): patches/calibrate_realsense_extrinsic_from_apriltags.py "
+                "from tags 1+2 top_left corners (examples/calib/tag_corners_base.json) + "
                 "patches/nero_datacollect/pyAgxArm-master/output4.png, reprojection RMSE "
-                "1.012 px. Full result: outputs/camera_extrinsics/camera_extrinsics.json. "
+                "1.012 px, full result outputs/camera_extrinsics/camera_extrinsics.json. "
                 "Supersedes the soft camera_height_m/pitch_down_deg estimate used by "
-                "export_robot_eef_from_wilor.py's CLI defaults. "
-                "NOTE: camera position shifted substantially vs. the prior output1.png-based "
-                "solve (z: 0.831m -> 0.604m, ~23cm), and RMSE roughly doubled (0.477 -> 1.012 px) "
-                "-- verify the camera/rig hasn't moved and this is the intended calibration before trusting it.",
+                "export_robot_eef_from_wilor.py's CLI defaults.",
             ),
             capture={},
         ),
@@ -326,8 +343,9 @@ NERO_TABLE_V1 = SceneAssets(
         ),
     },
     notes="Primary Nero humanego→robot cell. Camera intrinsics calibrated 2026-08-10; "
-    "extrinsics re-synced 2026-08-13 from outputs/camera_extrinsics/camera_extrinsics.json "
-    "(solved 2026-08-12 against output4.png). AprilTag geometry calibrated 2026-08-10; "
+    "extrinsics re-synced 2026-08-18 from le_ws/camera_extrinsics/camera_extrinsics_0818_012.json "
+    "(previously re-synced 2026-08-13 from outputs/camera_extrinsics/camera_extrinsics.json, "
+    "solved 2026-08-12 against output4.png). AprilTag geometry calibrated 2026-08-10; "
     "workspace_center/half_size and T_base_in_world still blank (not needed by the current "
     "pipeline).",
 )
