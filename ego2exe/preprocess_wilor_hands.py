@@ -65,17 +65,47 @@ def import_wilor_pipeline():
     return WiLorHandPose3dEstimationPipeline
 
 
-def make_wilor_pipeline(pretrained_dir: Path, hand_conf: float):
+def make_wilor_pipeline(pretrained_dir: Path, hand_conf: float, focal_length: float | None = None):
     cls = import_wilor_pipeline()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.float16 if device.type == "cuda" else torch.float32
-    pipe = cls(
+    kwargs: dict[str, Any] = dict(
         device=device,
         dtype=dtype,
         verbose=False,
         wilor_pretrained_dir=str(pretrained_dir),
     )
+    if focal_length is not None:
+        kwargs["focal_length"] = focal_length
+    pipe = cls(**kwargs)
     return pipe, device, hand_conf
+
+
+def probe_video_size(video_path: Path) -> tuple[int, int]:
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Failed to open video: {video_path}")
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+    return width, height
+
+
+def wilor_focal_length_for(width: int, height: int) -> float:
+    """WiLoR's `pred_cam_t_full` is only in real metric units if the pipeline's
+    `focal_length` kwarg is set to the *real* camera focal length (in pixels)
+    rescaled to WiLoR's fixed 256px model input, per its own docstring: "you
+    will need to scale the actual focal length by 256/max_image_side_length".
+
+    Leaving it at the library default (5000, tuned for a generic training-set
+    camera) makes `pred_cam_t_full`'s z consistently ~10-20x too large for this
+    camera's actual intrinsics, so `build_hand_json`'s 0.05-3.0m plausibility
+    check always fails and every frame falls back to
+    `assets_intrinsics_wrist_middle_mcp_scale`.
+    """
+    K = scaled_camera_intrinsics(width, height)
+    real_focal_px = (K[0, 0] + K[1, 1]) * 0.5
+    return float(real_focal_px * 256 / max(width, height))
 
 
 def scaled_camera_intrinsics(width: int, height: int) -> np.ndarray:
@@ -461,11 +491,15 @@ def main() -> None:
     out_root.mkdir(parents=True, exist_ok=True)
     pretrained_dir = as_abs(args.wilor_pretrained_dir) if args.wilor_pretrained_dir else DEFAULT_WILOR_CACHE
 
-    pipe, device, hand_conf = make_wilor_pipeline(pretrained_dir, args.hand_conf)
+    video_path = as_abs(args.video)
+    width, height = probe_video_size(video_path)
+    focal_length = wilor_focal_length_for(width, height)
+
+    pipe, device, hand_conf = make_wilor_pipeline(pretrained_dir, args.hand_conf, focal_length=focal_length)
     print(f"[preprocess_wilor_hands] device: {device}")
     print(f"[preprocess_wilor_hands] WiLoR pretrained dir: {pretrained_dir}")
+    print(f"[preprocess_wilor_hands] wilor focal_length: {focal_length:.1f} (video {width}x{height})")
 
-    video_path = as_abs(args.video)
     print(f"[preprocess_wilor_hands] Processing {video_path}")
     session_dir = process_video(video_path, out_root, pipe, hand_conf)
 
