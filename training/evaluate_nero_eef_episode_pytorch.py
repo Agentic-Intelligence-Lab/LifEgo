@@ -24,7 +24,6 @@ for path in (REPO_ROOT, OPENPI_ROOT, OPENPI_SRC):
         sys.path.insert(0, str(path))
 
 from openpi.models import model as _model
-from openpi.training import data_loader
 from training.evaluate_nero_eef_pytorch import (
     _build_model,
     _move_to_device,
@@ -235,6 +234,8 @@ def evaluate(args: argparse.Namespace) -> None:
     step_dir = _resolve_checkpoint_dir(checkpoint_root, args.step)
 
     data_config = config.data.create(config.assets_dirs, config.model)
+    from openpi.training import data_loader
+
     raw_dataset = data_loader.create_torch_dataset(data_config, config.model.action_horizon, config.model)
     transformed_dataset = data_loader.transform_dataset(raw_dataset, data_config)
 
