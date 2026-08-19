@@ -111,3 +111,47 @@ Checkpoints are written under:
 ```text
 outputs/openpi_checkpoints/nero_eef/<exp-name>
 ```
+
+## Evaluate A Full Episode
+
+Evaluate one complete episode by predicting `horizon[0]` at every frame and
+comparing it with the next-frame EEF label:
+
+```bash
+cd thirdparty/openpi
+
+uv run python ../../training/evaluate_nero_eef_episode_pytorch.py \
+  --exp-name nero_eef_pi05_pytorch_v1 \
+  --episode 0 \
+  --batch-size 4 \
+  --sample-steps 10 \
+  --device cuda:0 \
+  --output-dir ../../outputs/openpi_eval/nero_eef_pi05_pytorch_v1_episode0
+```
+
+Evaluate all episodes:
+
+```bash
+uv run python ../../training/evaluate_nero_eef_episode_pytorch.py \
+  --exp-name nero_eef_pi05_pytorch_v1 \
+  --all-episodes \
+  --batch-size 4 \
+  --sample-steps 10 \
+  --device cuda:0 \
+  --output-dir ../../outputs/openpi_eval/nero_eef_pi05_pytorch_v1_all
+```
+
+Each episode output contains:
+
+```text
+pred_vs_label.npz
+pred_robot_eef_trajectory.json
+label_robot_eef_trajectory.json
+```
+
+The JSON files use the same schema as exported EEF trajectories and can be
+replayed with `ego2exe/replay_eef_mujoco.py`.
+
+By default the final padded next-frame label of each episode is skipped. Add
+`--include-padded-last` only if you want to include that repeated endpoint in
+the metric and exported trajectories.
