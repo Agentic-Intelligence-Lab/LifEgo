@@ -155,3 +155,5 @@ replayed with `ego2exe/replay_eef_mujoco.py`.
 By default the final padded next-frame label of each episode is skipped. Add
 `--include-padded-last` only if you want to include that repeated endpoint in
 the metric and exported trajectories.
+
+Deployment scripts live in `../inference`. See `../inference/README.md`.
