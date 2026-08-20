@@ -25,6 +25,9 @@ from inference.nero_eef_common import (
     DEFAULT_DEFAULT_GRASP,
     DEFAULT_IMAGE_HEIGHT,
     DEFAULT_IMAGE_WIDTH,
+    DEFAULT_REALSENSE_FPS,
+    DEFAULT_REALSENSE_HEIGHT,
+    DEFAULT_REALSENSE_WIDTH,
     DEFAULT_STANDBY_JSONL,
     DEFAULT_TASK_PROMPT,
     as_abs,
@@ -166,7 +169,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--image", default=None, help="Static RGB image source.")
     parser.add_argument("--video", default=None, help="Video file source instead of live camera.")
+    parser.add_argument("--camera-backend", choices=["opencv", "realsense"], default="opencv")
     parser.add_argument("--camera-index", type=int, default=0)
+    parser.add_argument("--realsense-serial", default=None)
     parser.add_argument("--steps", type=int, default=DEFAULT_STEPS)
     parser.add_argument("--hz", type=float, default=DEFAULT_HZ)
     parser.add_argument("--output-dir", default=None, help="Optional directory for JSONL records and images.")
@@ -181,6 +186,9 @@ def parse_args() -> argparse.Namespace:
     args.camera_width = DEFAULT_CAMERA_WIDTH
     args.camera_height = DEFAULT_CAMERA_HEIGHT
     args.camera_fps = DEFAULT_CAMERA_FPS
+    args.realsense_width = DEFAULT_REALSENSE_WIDTH
+    args.realsense_height = DEFAULT_REALSENSE_HEIGHT
+    args.realsense_fps = DEFAULT_REALSENSE_FPS
     args.image_width = DEFAULT_IMAGE_WIDTH
     args.image_height = DEFAULT_IMAGE_HEIGHT
     if args.steps <= 0:

@@ -45,7 +45,7 @@ cd thirdparty/openpi
 uv run python ../../inference/nero_eef_remote_client.py \
   --host <server_ip> \
   --port 8000 \
-  --camera-index 0
+  --camera-backend realsense
 ```
 
 The command above is dry-run: it requests one action chunk and prints the target
@@ -55,7 +55,7 @@ EEF poses. To command the real robot:
 uv run python ../../inference/nero_eef_remote_client.py \
   --host <server_ip> \
   --port 8000 \
-  --camera-index 0 \
+  --camera-backend realsense \
   --channel can1 \
   --steps 60 \
   --execute
@@ -69,9 +69,10 @@ moves to a standby flange pose read from:
 DATA/20260816_nero_stack_object_horizontal/stack_object_20260816_163253_653146.jsonl
 ```
 
-Camera capture currently uses OpenCV `VideoCapture`, not the RealSense SDK. The
-default capture request is `1280x720@30`, then each frame is resized to
-`224x224` RGB to match the training input.
+Camera capture supports OpenCV and RealSense backends. For RealSense, the
+default stream is `640x480@30` BGR from `pyrealsense2`, converted to RGB and
+resized to `224x224` to match the training input. For a plain USB camera, use
+`--camera-backend opencv --camera-index 0`.
 
 ## Test Client
 
@@ -84,7 +85,7 @@ cd thirdparty/openpi
 uv run python ../../inference/nero_eef_test_client.py \
   --host <server_ip> \
   --port 8000 \
-  --camera-index 0 \
+  --camera-backend realsense \
   --steps 20
 ```
 
@@ -94,7 +95,7 @@ Optionally save request records and RGB inputs:
 uv run python ../../inference/nero_eef_test_client.py \
   --host <server_ip> \
   --port 8000 \
-  --camera-index 0 \
+  --camera-backend realsense \
   --steps 20 \
   --output-dir ../../outputs/openpi_inference_test \
   --save-images

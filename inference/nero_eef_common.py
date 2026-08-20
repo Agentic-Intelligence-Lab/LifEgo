@@ -32,6 +32,9 @@ DEFAULT_FIRMWARE = "v112"
 DEFAULT_CAMERA_WIDTH = 1280
 DEFAULT_CAMERA_HEIGHT = 720
 DEFAULT_CAMERA_FPS = 30.0
+DEFAULT_REALSENSE_WIDTH = 640
+DEFAULT_REALSENSE_HEIGHT = 480
+DEFAULT_REALSENSE_FPS = 30.0
 DEFAULT_IMAGE_WIDTH = 224
 DEFAULT_IMAGE_HEIGHT = 224
 DEFAULT_STANDBY_SPEED_PERCENT = 5
@@ -283,12 +286,57 @@ class OpenCvSource(FrameSource):
         self.cap.release()
 
 
+class RealSenseSource(FrameSource):
+    def __init__(
+        self,
+        *,
+        serial: str | None,
+        width: int,
+        height: int,
+        fps: float,
+        image_size: tuple[int, int],
+    ):
+        import cv2
+        import pyrealsense2 as rs
+
+        self.cv2 = cv2
+        self.image_size = image_size
+        self.pipeline = rs.pipeline()
+        config = rs.config()
+        if serial:
+            config.enable_device(serial)
+        config.enable_stream(rs.stream.color, int(width), int(height), rs.format.bgr8, int(fps))
+        self.pipeline.start(config)
+
+    def read(self) -> np.ndarray:
+        frames = self.pipeline.wait_for_frames()
+        color_frame = frames.get_color_frame()
+        if not color_frame:
+            raise RuntimeError("failed to read RealSense color frame")
+        frame_bgr = np.asanyarray(color_frame.get_data())
+        frame_rgb = self.cv2.cvtColor(frame_bgr, self.cv2.COLOR_BGR2RGB)
+        if frame_rgb.shape[1] != self.image_size[0] or frame_rgb.shape[0] != self.image_size[1]:
+            frame_rgb = self.cv2.resize(frame_rgb, self.image_size, interpolation=self.cv2.INTER_AREA)
+        return np.asarray(frame_rgb, dtype=np.uint8)
+
+    def close(self) -> None:
+        self.pipeline.stop()
+
+
 def make_frame_source(args: argparse.Namespace) -> FrameSource:
     image_size = (int(args.image_width), int(args.image_height))
     if getattr(args, "image", None):
         return StaticImageSource(as_abs(args.image), image_size=image_size)
     if getattr(args, "video", None):
         return OpenCvSource(camera=str(as_abs(args.video)), width=None, height=None, fps=None, image_size=image_size)
+    if getattr(args, "camera_backend", "opencv") == "realsense":
+        return RealSenseSource(
+            serial=getattr(args, "realsense_serial", None),
+            width=int(getattr(args, "realsense_width", DEFAULT_REALSENSE_WIDTH)),
+            height=int(getattr(args, "realsense_height", DEFAULT_REALSENSE_HEIGHT)),
+            fps=float(getattr(args, "realsense_fps", DEFAULT_REALSENSE_FPS)),
+            image_size=image_size,
+        )
     return OpenCvSource(
         camera=int(args.camera_index),
         width=args.camera_width,
