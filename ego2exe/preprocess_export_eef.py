@@ -12,7 +12,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 from assets import DEFAULT_ASSETS
-from hand2gripper import HumanEgoMode
+from hand2gripper import MODES, HumanEgoMode, PinchPlaneMode, make_mode
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -58,10 +58,13 @@ def load_camera_from_assets() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return T_base_in_cam, T_cam_in_base, p_cam_in_base
 
 
-def make_hand2gripper_mode() -> HumanEgoMode:
+def make_hand2gripper_mode(
+    mode: str = HumanEgoMode.MODE_NAME,
+    forward_seed: str | None = None,
+) -> HumanEgoMode:
     T_hand_to_ee = DEFAULT_ASSETS.extra_transforms.get("T_hand_to_ee")
     T_hand_from_eef = None if T_hand_to_ee is None else np.linalg.inv(np.array(T_hand_to_ee, dtype=np.float64))
-    return HumanEgoMode(T_hand_from_eef=T_hand_from_eef)
+    return make_mode(mode, forward_seed=forward_seed, T_hand_from_eef=T_hand_from_eef)
 
 
 def validate_axis_correction(correction: np.ndarray) -> np.ndarray:
@@ -91,7 +94,7 @@ def export_eef(args: argparse.Namespace) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     T_base_in_cam, T_cam_in_base, p_cam_in_base = load_camera_from_assets()
-    hand2gripper = make_hand2gripper_mode()
+    hand2gripper = make_hand2gripper_mode(args.hand2gripper_mode, args.forward_seed)
     axis_correction = validate_axis_correction(DEFAULT_C_REAL_FROM_HUMANEGO)
     apply_correction = not args.no_axis_correction
 
@@ -147,8 +150,8 @@ def export_eef(args: argparse.Namespace) -> None:
 
     metadata = {
         "session": str(session_dir),
-        "source": "WiLoR kpts_3d -> hand2gripper.HumanEgoMode",
-        "hand2gripper_mode": "HumanEgoMode",
+        "source": f"WiLoR kpts_3d -> hand2gripper.{type(hand2gripper).__name__}",
+        "hand2gripper_mode": hand2gripper.mode_label,
         "hand_key": args.hand_key,
         "units": "meters",
         "base_frame": {
@@ -269,6 +272,21 @@ def main() -> None:
         "--no-axis-correction",
         action="store_true",
         help="Disable the default HumanEgo-to-real local EEF axis correction.",
+    )
+    parser.add_argument(
+        "--hand2gripper-mode",
+        default=HumanEgoMode.MODE_NAME,
+        choices=sorted(MODES),
+        help="Hand-to-gripper definition. 'humanego' reproduces upstream HumanEgo; "
+             "'pinch_plane' keeps the MCP jaw axis but drops the thumb from the "
+             "forward-axis reference.",
+    )
+    parser.add_argument(
+        "--forward-seed",
+        default=None,
+        choices=list(PinchPlaneMode.FORWARD_SEEDS),
+        help=f"Forward-axis seed for --hand2gripper-mode pinch_plane "
+             f"(default: {PinchPlaneMode.DEFAULT_FORWARD_SEED}).",
     )
     args = parser.parse_args()
     export_eef(args)

@@ -36,6 +36,18 @@ def make_pose(rotation: np.ndarray, translation: np.ndarray) -> np.ndarray:
     return pose
 
 
+# Named indices into the HumanEgo 21-keypoint order (see WILOR_TO_HUMANEGO below).
+HE_THUMB_TIP = 0
+HE_INDEX_TIP = 1
+HE_WRIST = 5
+HE_THUMB_MCP = 6
+HE_INDEX_MCP = 8
+HE_MIDDLE_MCP = 11
+HE_RING_MCP = 14
+HE_PINKY_MCP = 17
+HE_PALM_CENTER = 20
+
+
 @dataclass
 class GripperTarget:
     mode: str
@@ -66,7 +78,13 @@ class HumanEgoMode:
     The input 3D keypoints are expected in WiLoR/MANO order and camera frame.
     The output EEF pose is also in the camera frame; camera-to-robot-base
     conversion belongs to the export stage.
+
+    This mirrors the upstream HumanEgo implementation (TX-Leo/HumanEgo,
+    ``preprocess/AriaHandsTypes.py::MidpointFrameBuilder``) line for line.  Kept
+    as the reference mode; see PinchPlaneMode for the corrected forward axis.
     """
+
+    MODE_NAME = "humanego"
 
     # WiLoR/MANO 21-keypoint order:
     #   0 wrist, 1 thumb CMC, 2 thumb MCP, 3 thumb IP, 4 thumb tip,
@@ -133,6 +151,11 @@ class HumanEgoMode:
         self.keep_rotation_sign_consistency = bool(keep_rotation_sign_consistency)
         self._prev_mid_rotation: np.ndarray | None = None
 
+    @property
+    def mode_label(self) -> str:
+        """Identifier recorded in the exported JSON, so a run is traceable to its mode."""
+        return self.MODE_NAME
+
     def reset(self) -> None:
         self._prev_mid_rotation = None
 
@@ -168,23 +191,35 @@ class HumanEgoMode:
             return None
         return make_pose(np.column_stack([x_axis, y_axis, z_axis]), wrist)
 
+    def _forward_seed(self, kpts_humanego: np.ndarray) -> np.ndarray:
+        """Seed vector for the forward axis, before Gram-Schmidt against the jaw axis.
+
+        Only the component orthogonal to the jaw axis survives the projection, so
+        what this has to get right is the *plane* the seed spans with that axis,
+        not the seed's own direction.
+
+        HumanEgo's original choice: wrist -> midpoint of the thumb/index MCPs.
+        See PinchPlaneMode for why that midpoint is a problematic reference.
+        """
+        wrist = kpts_humanego[HE_WRIST]
+        base_midpoint = (kpts_humanego[HE_THUMB_MCP] + kpts_humanego[HE_INDEX_MCP]) * 0.5
+        return base_midpoint - wrist
+
     def _build_midpoint_pose(
         self,
         kpts_humanego: np.ndarray,
         fallback_rotation: np.ndarray | None = None,
         prev_rotation: np.ndarray | None = None,
     ) -> tuple[np.ndarray | None, np.ndarray | None]:
-        thumb_tip = kpts_humanego[0]
-        index_tip = kpts_humanego[1]
-        thumb_base = kpts_humanego[6]
-        index_base = kpts_humanego[8]
-        wrist = kpts_humanego[5]
+        thumb_tip = kpts_humanego[HE_THUMB_TIP]
+        index_tip = kpts_humanego[HE_INDEX_TIP]
+        thumb_base = kpts_humanego[HE_THUMB_MCP]
+        index_base = kpts_humanego[HE_INDEX_MCP]
 
         midpoint = (thumb_tip + index_tip) * 0.5
-        base_midpoint = (thumb_base + index_base) * 0.5
 
         x_axis = normalize(index_base - thumb_base)
-        arm = base_midpoint - wrist
+        arm = self._forward_seed(kpts_humanego)
         if x_axis is not None and float(np.linalg.norm(arm)) >= 1e-5:
             y_proj = arm - float(np.dot(arm, x_axis)) * x_axis
             y_axis = normalize(y_proj)
@@ -240,7 +275,7 @@ class HumanEgoMode:
         T_eef_in_cam = T_hand_in_cam @ self.T_eef_from_hand
         grasp_state = self._compute_grasp_state(kpts_humanego)
         return GripperTarget(
-            mode="humanego",
+            mode=self.mode_label,
             T_hand_in_cam=T_hand_in_cam,
             T_eef_in_cam=T_eef_in_cam,
             grasp_state=grasp_state,
@@ -261,3 +296,98 @@ class HumanEgoMode:
             confidence=hand.get("confidence"),
             is_right=hand.get("is_right"),
         )
+
+
+class PinchPlaneMode(HumanEgoMode):
+    """HumanEgoMode with the thumb removed from the forward-axis reference.
+
+    Everything else is inherited: the jaw axis stays ``index_MCP - thumb_MCP``
+    (MCPs, not fingertips, so it does not degenerate as the tips meet), as does
+    the grasp ratio, the sign-consistency guard and the fallback chain.
+
+    Why the seed changes
+    --------------------
+    HumanEgo seeds the forward axis with ``(thumb_MCP + index_MCP)/2 - wrist``.
+    The thumb MCP is a poor reference for two reasons: it does not lie in the
+    plane of the other MCPs (a static tilt), and it is not rigid relative to the
+    palm - the thumb's carpometacarpal joint moves it during opposition, so the
+    forward axis swings as the hand opens and closes.
+
+    Measured over 3 sessions / ~600 WiLoR frames of stack_object_horizontal,
+    as pitch away from a rigid palm plane built from wrist + the four finger MCPs:
+
+        seed                             std          swing open-vs-closed
+        (thumb_MCP+index_MCP)/2 - wrist  5.0/3.6/4.0  -7.7 / -5.6 / -6.1 deg
+        index_tip - thumb_MCP            2.5/1.9/2.1  +2.4 / +2.9 / +3.1 deg
+        four-finger MCP centroid - wrist 0.7/1.4/0.7  +0.2 / +1.4 / +0.9 deg
+
+    The three seeds below all agree to within ~2 deg of each other and differ
+    from HumanEgo's by 5-10 deg, which is what identifies HumanEgo's as the
+    outlier rather than any of these.
+
+    ``index_tip``
+        ``index_tip - thumb_MCP``, i.e. the plane through thumb MCP, index MCP
+        and index tip - the plane the pinch actually happens in.  Note the
+        ``thumb_MCP -> index_MCP`` leg lies exactly along the jaw axis and is
+        therefore annihilated by the Gram-Schmidt projection, making this seed
+        *identical* to ``index_tip - index_MCP``: the thumb does not enter the
+        forward axis at all.  Fingertip noise enters, but the flexion that
+        closes a pinch runs mostly along the jaw axis, which is projected out.
+    ``finger_mcp_centroid``
+        ``mean(index, middle, ring, pinky MCP) - wrist``.  Rigid throughout the
+        grasp, so it is the steadier of the two, at the cost of describing the
+        palm plane rather than the pinch plane.
+
+    Which one transfers better is an empirical question for the eval harness
+    (``rho_rot`` and the L2b per-anchor ``err_rot_deg``), not for this file.
+    """
+
+    MODE_NAME = "pinch_plane"
+    FORWARD_SEEDS = ("index_tip", "finger_mcp_centroid")
+    DEFAULT_FORWARD_SEED = "index_tip"
+
+    def __init__(self, *args: Any, forward_seed: str | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        seed = self.DEFAULT_FORWARD_SEED if forward_seed is None else str(forward_seed)
+        if seed not in self.FORWARD_SEEDS:
+            raise ValueError(f"forward_seed must be one of {self.FORWARD_SEEDS}, got {seed!r}")
+        self.seed_kind = seed
+
+    @property
+    def mode_label(self) -> str:
+        return f"{self.MODE_NAME}:{self.seed_kind}"
+
+    def _forward_seed(self, kpts_humanego: np.ndarray) -> np.ndarray:
+        if self.seed_kind == "index_tip":
+            return kpts_humanego[HE_INDEX_TIP] - kpts_humanego[HE_THUMB_MCP]
+        centroid = (
+            kpts_humanego[HE_INDEX_MCP]
+            + kpts_humanego[HE_MIDDLE_MCP]
+            + kpts_humanego[HE_RING_MCP]
+            + kpts_humanego[HE_PINKY_MCP]
+        ) / 4.0
+        return centroid - kpts_humanego[HE_WRIST]
+
+
+MODES = {
+    HumanEgoMode.MODE_NAME: HumanEgoMode,
+    PinchPlaneMode.MODE_NAME: PinchPlaneMode,
+}
+
+
+def make_mode(
+    name: str = HumanEgoMode.MODE_NAME,
+    *,
+    forward_seed: str | None = None,
+    **kwargs: Any,
+) -> HumanEgoMode:
+    """Build a hand-to-gripper mode by name.  ``forward_seed`` applies to pinch_plane only."""
+    try:
+        cls = MODES[name]
+    except KeyError:
+        raise ValueError(f"unknown hand2gripper mode {name!r}; choose from {sorted(MODES)}") from None
+    if cls is PinchPlaneMode:
+        return cls(forward_seed=forward_seed, **kwargs)
+    if forward_seed is not None:
+        raise ValueError(f"--forward-seed is only meaningful for mode 'pinch_plane', not {name!r}")
+    return cls(**kwargs)

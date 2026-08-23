@@ -40,7 +40,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 from assets import DEFAULT_ASSETS
-from hand2gripper import GripperTarget, HumanEgoMode
+from hand2gripper import MODES, GripperTarget, HumanEgoMode, PinchPlaneMode, make_mode
 
 # wilor_hands_config.json reports keypoint_order "wilor_mano_21": index 0 is
 # the wrist, followed by 4 joints each for thumb/index/middle/ring/pinky.
@@ -68,12 +68,15 @@ DEPTH_SOURCE_LABELS = {
 }
 
 
-def make_hand2gripper_mode() -> HumanEgoMode:
+def make_hand2gripper_mode(
+    mode: str = HumanEgoMode.MODE_NAME,
+    forward_seed: str | None = None,
+) -> HumanEgoMode:
     """Mirror preprocess_export_eef.make_hand2gripper_mode so the visualized
     EEF target matches what the export stage actually produces."""
     t_hand_to_ee = DEFAULT_ASSETS.extra_transforms.get("T_hand_to_ee")
     t_hand_from_eef = None if t_hand_to_ee is None else np.linalg.inv(np.array(t_hand_to_ee, dtype=np.float64))
-    return HumanEgoMode(T_hand_from_eef=t_hand_from_eef)
+    return make_mode(mode, forward_seed=forward_seed, T_hand_from_eef=t_hand_from_eef)
 
 
 def load_camera_to_base(apply_axis_correction: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
@@ -290,6 +293,14 @@ def main() -> None:
         "--no-axis-correction", action="store_true",
         help="Print the raw camera->base EEF pose instead of the axis-corrected one preprocess_export_eef.py exports by default",
     )
+    parser.add_argument(
+        "--hand2gripper-mode", default=HumanEgoMode.MODE_NAME, choices=sorted(MODES),
+        help="Hand-to-gripper definition to visualize; matches preprocess_export_eef.py",
+    )
+    parser.add_argument(
+        "--forward-seed", default=None, choices=list(PinchPlaneMode.FORWARD_SEEDS),
+        help=f"Forward-axis seed for pinch_plane (default: {PinchPlaneMode.DEFAULT_FORWARD_SEED})",
+    )
     args = parser.parse_args()
 
     session_dir = Path(args.session)
@@ -308,8 +319,8 @@ def main() -> None:
     out_path = Path(args.out) if args.out else session_dir / "preprocess" / "vis" / "hand2gripper_vis.mp4"
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    mode_r = make_hand2gripper_mode()
-    mode_l = make_hand2gripper_mode()
+    mode_r = make_hand2gripper_mode(args.hand2gripper_mode, args.forward_seed)
+    mode_l = make_hand2gripper_mode(args.hand2gripper_mode, args.forward_seed)
     T_cam_in_base, T_base_in_cam, axis_correction = load_camera_to_base(not args.no_axis_correction)
 
     writer: cv2.VideoWriter | None = None
