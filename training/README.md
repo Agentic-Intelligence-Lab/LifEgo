@@ -19,6 +19,35 @@ outputs/lerobot/local/nero_ego_stack_object_horizontal_eef
 
 It contains 30 episodes and 5950 frames from `ymq`, `xule`, and `hyj`.
 
+Build a co-train dataset from reconstructed ego episodes plus real Nero teleop
+episodes:
+
+```bash
+cd thirdparty/openpi
+
+uv run python ../../ego2exe/build_lerobot_eef_cotrain_dataset.py \
+  --overwrite \
+  --skip-bad
+```
+
+The default output is:
+
+```text
+outputs/lerobot/local/nero_ego_real_stack_object_horizontal_eef
+```
+
+Both sources use the same schema:
+
+```text
+image: 224x224 ego/RGB image
+state/action: [x, y, z, qx, qy, qz, qw, gripper]
+```
+
+Ego episodes use the flattened, corrected EEF trajectory
+`robot_eef_scene_camera_axis_corrected_flat_x0`. Realbot episodes use the
+recorded RGB MP4 frame selected by `camera_rgb.video_frame_index` and the
+recorded TCP pose from `poses.tcp_pose`.
+
 Only ego RGB is used:
 
 ```text
@@ -92,7 +121,34 @@ For the current dataset, two epochs with PyTorch global batch size 8 are:
 ```
 
 If `--num-train-steps` is omitted, the local training entry point computes this
-two-epoch value from the selected global batch size.
+two-epoch value from `meta/info.json` and the selected global batch size. This
+also works for the co-train dataset.
+
+Train on the co-train dataset:
+
+```bash
+cd thirdparty/openpi
+
+uv run python ../../training/compute_norm_stats.py \
+  --repo-id local/nero_ego_real_stack_object_horizontal_eef \
+  --dataset-root ../../outputs/lerobot/local/nero_ego_real_stack_object_horizontal_eef \
+  --assets-base-dir ../../outputs/openpi_assets_cotrain \
+  --batch-size 32 \
+  --num-workers 0
+
+uv run torchrun --standalone --nnodes=1 --nproc_per_node=2 \
+  ../../training/train_nero_eef_pytorch.py \
+  --repo-id local/nero_ego_real_stack_object_horizontal_eef \
+  --dataset-root ../../outputs/lerobot/local/nero_ego_real_stack_object_horizontal_eef \
+  --assets-base-dir ../../outputs/openpi_assets_cotrain \
+  --model pi05 \
+  --pytorch-weight-path /mnt/data/szeluresearch/models/pi05_base \
+  --exp-name nero_eef_pi05_pytorch_cotrain_v1 \
+  --batch-size 8 \
+  --num-workers 2 \
+  --save-interval 1000 \
+  --loss-action-dim 8
+```
 
 This expects:
 

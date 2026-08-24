@@ -65,6 +65,7 @@ def build_policy_runtime(args: argparse.Namespace) -> PolicyRuntime:
         batch_size=1,
         num_workers=0,
         num_train_steps=1,
+        assets_base_dir=args.assets_base_dir,
         pytorch_weight_path=None,
         wandb_enabled=False,
     )
@@ -163,16 +164,21 @@ class NeroEefRemotePolicy:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo-id", default=DEFAULT_REPO_ID)
     parser.add_argument("--exp-name", default="nero_eef_pi05_pytorch_v1")
     parser.add_argument("--checkpoint-dir", default=None, help="Experiment dir or exact step dir.")
     parser.add_argument("--step", type=int, default=None, help="Checkpoint step to load. Defaults to latest.")
+    parser.add_argument(
+        "--assets-base-dir",
+        default=None,
+        help="OpenPI assets root containing nero_eef/<repo-id>/norm_stats.json.",
+    )
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--device", default=DEFAULT_DEVICE)
     parser.add_argument("--validate-only", action="store_true", help="Load model and run one dummy inference.")
     args = parser.parse_args()
 
-    args.repo_id = DEFAULT_REPO_ID
     args.model = "pi05"
     args.sample_steps = DEFAULT_SAMPLE_STEPS
     args.seed = 0

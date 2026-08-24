@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 from pathlib import Path
 import sys
 
@@ -27,9 +28,12 @@ from training import nero_eef_policy
 
 
 DEFAULT_REPO_ID = "local/nero_ego_stack_object_horizontal_eef"
+DEFAULT_COTRAIN_REPO_ID = "local/nero_ego_real_stack_object_horizontal_eef"
 DEFAULT_DATASET_ROOT = REPO_ROOT / "outputs" / "lerobot" / DEFAULT_REPO_ID
+DEFAULT_COTRAIN_DATASET_ROOT = REPO_ROOT / "outputs" / "lerobot" / DEFAULT_COTRAIN_REPO_ID
 DEFAULT_TASK_PROMPT = "Place the black pillar in the plate."
 DEFAULT_TOTAL_FRAMES = 5950
+DEFAULT_COTRAIN_TOTAL_FRAMES = 0
 DEFAULT_TRAIN_EPOCHS = 2
 DEFAULT_BATCH_SIZE = 16
 
@@ -43,6 +47,26 @@ def train_steps_for_epochs(
     if batch_size <= 0:
         raise ValueError(f"batch_size must be positive, got {batch_size}")
     return (total_frames // batch_size) * epochs
+
+
+def dataset_total_frames(dataset_root: str | Path) -> int:
+    info_path = Path(dataset_root).expanduser() / "meta" / "info.json"
+    if not info_path.is_file():
+        raise FileNotFoundError(f"missing dataset metadata: {info_path}")
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    total = int(info["total_frames"])
+    if total <= 0:
+        raise ValueError(f"invalid total_frames in {info_path}: {total}")
+    return total
+
+
+def train_steps_for_dataset(
+    dataset_root: str | Path,
+    batch_size: int,
+    *,
+    epochs: int = DEFAULT_TRAIN_EPOCHS,
+) -> int:
+    return train_steps_for_epochs(batch_size, total_frames=dataset_total_frames(dataset_root), epochs=epochs)
 
 
 @dataclasses.dataclass(frozen=True)

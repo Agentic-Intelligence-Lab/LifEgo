@@ -20,7 +20,7 @@ from training.nero_eef_config import (
     DEFAULT_REPO_ID,
     build_config,
     dataset_home_from_root,
-    train_steps_for_epochs,
+    train_steps_for_dataset,
 )
 from openpi import transforms
 
@@ -37,7 +37,7 @@ def compute(args: argparse.Namespace) -> None:
 
     num_train_steps = args.num_train_steps
     if num_train_steps is None:
-        num_train_steps = train_steps_for_epochs(args.batch_size)
+        num_train_steps = train_steps_for_dataset(args.dataset_root, args.batch_size)
     config = build_config(
         repo_id=args.repo_id,
         exp_name=args.exp_name,
@@ -46,6 +46,7 @@ def compute(args: argparse.Namespace) -> None:
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         num_train_steps=num_train_steps,
+        assets_base_dir=args.assets_base_dir,
         wandb_enabled=False,
     )
     data_config = config.data.create(config.assets_dirs, config.model)
@@ -81,6 +82,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-id", default=DEFAULT_REPO_ID)
     parser.add_argument("--dataset-root", default=str(DEFAULT_DATASET_ROOT))
+    parser.add_argument(
+        "--assets-base-dir",
+        default=None,
+        help="OpenPI assets root. Norm stats are written under <assets-base-dir>/nero_eef/<repo-id>/.",
+    )
     parser.add_argument("--exp-name", default="nero_eef_debug")
     parser.add_argument("--model", choices=["pi0", "pi05"], default="pi05")
     parser.add_argument("--full-finetune", action="store_true")
