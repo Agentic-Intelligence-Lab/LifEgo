@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
-from assets import DEFAULT_ASSETS, MUJOCO_NERO_SCENE
+from assets import DEFAULT_ASSETS, MUJOCO_ARX_SCENE
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -295,7 +295,7 @@ def save_result(args: argparse.Namespace, prepared: dict[str, Any], result: dict
 
 
 def add_common_args(parser: argparse.ArgumentParser, *, default_out: str) -> None:
-    parser.add_argument("--scene", default=str(MUJOCO_NERO_SCENE))
+    parser.add_argument("--scene", default=str(MUJOCO_ARX_SCENE))
     parser.add_argument("--eef", default=DEFAULT_EEF)
     parser.add_argument("--out", default=default_out)
     parser.add_argument("--target-type", choices=["site", "body"], default="site")

@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
-from assets import MUJOCO_NERO_SCENE
+from assets import MUJOCO_ARX_SCENE
 from utils_replay import as_abs, draw_marker_path, load_runtime, quat_xyzw_to_wxyz, require_runtime
 
 
@@ -145,7 +145,7 @@ def render_mp4(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scene", default=str(MUJOCO_NERO_SCENE))
+    parser.add_argument("--scene", default=str(MUJOCO_ARX_SCENE))
     parser.add_argument("--eef", default="outputs/new_pipeline/ego_nero_easy/robot_eef_scene_camera/robot_eef_trajectory.json")
     parser.add_argument("--out", default="outputs/new_pipeline/replays/eef_marker.mp4")
     parser.add_argument("--viewer", action="store_true")

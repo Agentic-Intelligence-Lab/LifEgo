@@ -1,44 +1,86 @@
 #!/usr/bin/env python3
-"""Replay real-bot JSONL on the left and optional IK npz on the right."""
+"""Replay ARX real-bot teleoperation parquet in the MuJoCo scene."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
-from assets import MUJOCO_NERO_DUAL_SCENE
-from replay_ik_mujoco import load_ik
-from utils_replay import as_abs, load_runtime, quat_xyzw_to_wxyz, require_runtime
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
-ARM_JOINTS = tuple(f"joint{i}" for i in range(1, 8))
-GRIPPER_JOINTS = ("gripper_joint1", "gripper_joint2")
-RIGHT_PREFIX = "r_"
+from assets import DEFAULT_ASSETS, MUJOCO_ARX_SCENE
+from utils_replay import as_abs, load_runtime, require_runtime
+
+LEFT_ARM_JOINTS = tuple(f"left_joint{i}" for i in range(1, 7))
+LEFT_GRIPPER_JOINTS = ("left_joint7", "left_joint8")
+RIGHT_ARM_JOINTS = tuple(f"right_joint{i}" for i in range(11, 17))
+RIGHT_GRIPPER_JOINTS = ("right_joint17", "right_joint18")
+
+DEFAULT_REALBOT = "DATA/arx_ego_dataset/data/chunk-000/file-000.parquet"
+DEFAULT_OUT = "outputs/new_pipeline/arx_replays/realbot_file_000.mp4"
 
 
-def load_realbot(path: Path) -> dict:
-    times, qpos, width = [], [], []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        rec = json.loads(line)
-        if rec.get("kind") != "sample":
-            continue
-        times.append(float(rec["elapsed_s"]))
-        qpos.append(rec["follower"]["position_rad"])
-        w = rec.get("gripper_feedback", {}).get("value")
-        if w is None:
-            w = rec.get("gripper_ctrl", {}).get("value", 0.1)
-        width.append(float(w))
-    if not qpos:
-        raise RuntimeError(f"No sample records in {path}")
-    t = np.asarray(times, dtype=np.float64)
-    t -= t[0]
+def load_parquet(path: Path, column: str) -> dict[str, Any]:
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise ImportError("pyarrow is required to replay LeRobot parquet data") from exc
+
+    table = pq.read_table(path)
+    names = None
+    metadata = table.schema.metadata or {}
+    hf_meta = metadata.get(b"huggingface")
+    if hf_meta:
+        try:
+            info = json.loads(hf_meta.decode("utf-8")).get("info", {})
+            names = info.get("features", {}).get(column, {}).get("names")
+        except Exception:
+            names = None
+    if names is None:
+        names = [
+            "left_joint_1",
+            "left_joint_2",
+            "left_joint_3",
+            "left_joint_4",
+            "left_joint_5",
+            "left_joint_6",
+            "left_gripper",
+            "right_joint_1",
+            "right_joint_2",
+            "right_joint_3",
+            "right_joint_4",
+            "right_joint_5",
+            "right_joint_6",
+            "right_gripper",
+        ]
+
+    if column not in table.column_names:
+        raise RuntimeError(f"Column {column!r} missing from {path}; columns={table.column_names}")
+    state = np.asarray(table[column].to_pylist(), dtype=np.float64)
+    if state.ndim != 2 or state.shape[1] != 14:
+        raise RuntimeError(f"Expected {column} shape [N,14], got {state.shape}")
+    timestamp = np.asarray(table["timestamp"].to_pylist(), dtype=np.float64)
+    timestamp -= timestamp[0]
+
     return {
-        "time_s": t,
-        "joint_qpos": np.asarray(qpos, dtype=np.float64),
-        "gripper_width_m": np.asarray(width, dtype=np.float64),
+        "time_s": timestamp,
+        "left_qpos": state[:, :6],
+        "left_gripper_raw": state[:, 6],
+        "right_qpos": state[:, 7:13],
+        "right_gripper_raw": state[:, 13],
+        "frame_index": np.asarray(table["frame_index"].to_pylist(), dtype=np.int64),
+        "episode_index": np.asarray(table["episode_index"].to_pylist(), dtype=np.int64),
+        "task_index": np.asarray(table["task_index"].to_pylist(), dtype=np.int64),
+        "feature_names": names,
+        "source_column": column,
     }
 
 
@@ -49,168 +91,151 @@ def resample_series(src_t: np.ndarray, values: np.ndarray, dst_t: np.ndarray) ->
         out = np.zeros((len(dst_t), values.shape[1]), dtype=np.float64)
         out[:] = values[0]
         return out
-    src_u = (src_t - src_t[0]) / max(float(src_t[-1] - src_t[0]), 1e-12)
-    dst_u = (dst_t - dst_t[0]) / max(float(dst_t[-1] - dst_t[0]), 1e-12) if len(dst_t) > 1 else np.zeros(len(dst_t))
     if values.ndim == 1:
-        return np.interp(dst_u, src_u, values)
+        return np.interp(dst_t, src_t, values)
     out = np.zeros((len(dst_t), values.shape[1]), dtype=np.float64)
     for j in range(values.shape[1]):
-        out[:, j] = np.interp(dst_u, src_u, values[:, j])
+        out[:, j] = np.interp(dst_t, src_t, values[:, j])
     return out
 
 
-def qpos_map(model, prefix: str) -> dict[str, int]:
+def gripper_raw_to_width(raw: np.ndarray, open_m: float, closed_m: float) -> np.ndarray:
+    raw = np.asarray(raw, dtype=np.float64)
+    if np.all((raw >= 0.0) & (raw <= open_m * 1.5)):
+        return np.clip(raw, closed_m, open_m)
+    span = float(np.nanmax(raw) - np.nanmin(raw))
+    if span < 1e-2:
+        return np.full(len(raw), open_m, dtype=np.float64)
+    # ARX teleop gripper logs are not meters in this dataset: larger raw value
+    # corresponds to a more open gripper, lower raw value to a more closed one.
+    norm = (raw - np.nanmin(raw)) / span
+    return closed_m + norm * (open_m - closed_m)
+
+
+def qpos_addrs(model, names: tuple[str, ...]) -> np.ndarray:
     _, mujoco = require_runtime()
-    out = {}
-    for name in ARM_JOINTS + GRIPPER_JOINTS:
-        jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, prefix + name)
+    addrs = []
+    for name in names:
+        jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
         if jid < 0:
-            raise RuntimeError(f"missing joint in fixed dual scene: {prefix + name}")
-        out[name] = int(model.jnt_qposadr[jid])
-    return out
+            raise RuntimeError(f"missing joint in ARX scene: {name}")
+        addrs.append(int(model.jnt_qposadr[jid]))
+    return np.asarray(addrs, dtype=np.int32)
 
 
-def actuator_map(model, prefix: str) -> dict[str, int]:
+def actuator_ids(model, names: tuple[str, ...]) -> dict[str, int]:
     _, mujoco = require_runtime()
     out = {}
-    for name in tuple(f"joint{i}_pos" for i in range(1, 8)) + ("gripper_joint1_pos", "gripper_joint2_pos"):
-        aid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, prefix + name)
+    for name in names:
+        aid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, f"{name}_pos")
         if aid >= 0:
             out[name] = int(aid)
     return out
 
 
-def mocap_id(model, body_name: str) -> int | None:
-    _, mujoco = require_runtime()
-    bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
-    if bid < 0:
-        return None
-    mid = int(model.body_mocapid[bid])
-    return mid if mid >= 0 else None
-
-
-def site_id(model, site_name: str) -> int | None:
-    _, mujoco = require_runtime()
-    sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, site_name)
-    return int(sid) if sid >= 0 else None
-
-
-def apply_joints(data, qmap: dict[str, int], amap: dict[str, int], q: np.ndarray, width_m: float) -> None:
-    for i, value in enumerate(q, start=1):
-        data.qpos[qmap[f"joint{i}"]] = float(value)
-        aid = amap.get(f"joint{i}_pos")
+def apply_arm(data, addrs: np.ndarray, act_ids: dict[str, int], joint_names: tuple[str, ...], q: np.ndarray) -> None:
+    data.qpos[addrs] = np.asarray(q, dtype=np.float64)
+    for name, value in zip(joint_names, q):
+        aid = act_ids.get(name)
         if aid is not None:
             data.ctrl[aid] = float(value)
-    width_m = float(np.clip(width_m, 0.0, 0.1))
+
+
+def apply_gripper(data, addrs: np.ndarray, act_ids: dict[str, int], joint_names: tuple[str, ...], width_m: float) -> None:
+    width_m = float(np.clip(width_m, 0.0, gripper_open_default()))
     finger = 0.5 * width_m
-    data.qpos[qmap["gripper_joint1"]] = finger
-    data.qpos[qmap["gripper_joint2"]] = -finger
-    if "gripper_joint1_pos" in amap:
-        data.ctrl[amap["gripper_joint1_pos"]] = finger
-    if "gripper_joint2_pos" in amap:
-        data.ctrl[amap["gripper_joint2_pos"]] = -finger
+    data.qpos[addrs] = finger
+    for name in joint_names:
+        aid = act_ids.get(name)
+        if aid is not None:
+            data.ctrl[aid] = finger
 
 
-def set_marker(data, mid: int | None, pos: np.ndarray | None, quat_xyzw: np.ndarray | None) -> None:
-    if mid is None:
-        return
-    if pos is None or quat_xyzw is None:
-        data.mocap_pos[mid] = [10.0, 10.0, 10.0]
-        return
-    data.mocap_pos[mid] = pos
-    data.mocap_quat[mid] = quat_xyzw_to_wxyz(quat_xyzw)
+def gripper_open_default() -> float:
+    return float(DEFAULT_ASSETS.platform.gripper_open_m if DEFAULT_ASSETS.platform.gripper_open_m is not None else 0.088)
+
+
+def gripper_closed_default() -> float:
+    return float(DEFAULT_ASSETS.platform.gripper_closed_m if DEFAULT_ASSETS.platform.gripper_closed_m is not None else 0.0)
 
 
 def make_camera():
     _, mujoco = require_runtime()
     cam = mujoco.MjvCamera()
     cam.type = mujoco.mjtCamera.mjCAMERA_FREE
-    cam.lookat[:] = [-0.25, 0.45, 0.28]
-    cam.distance = 1.6
+    cam.lookat[:] = [0.25, 0.0, 0.18]
+    cam.distance = 1.35
     cam.azimuth = 145.0
-    cam.elevation = -28.0
+    cam.elevation = -24.0
     return cam
 
 
-def build_series(realbot_path: Path, ik_path: str | None, fps: float) -> dict:
-    real = load_realbot(realbot_path)
-    duration = float(real["time_s"][-1]) if len(real["time_s"]) > 1 else 0.0
-    n = max(int(round(duration * fps)) + 1, 1)
-    t = np.arange(n, dtype=np.float64) / fps
-    if duration > 0:
-        t[-1] = min(t[-1], duration)
-    q_real = resample_series(real["time_s"], real["joint_qpos"], t)
-    w_real = resample_series(real["time_s"], real["gripper_width_m"], t)
+def build_series(args: argparse.Namespace) -> dict[str, Any]:
+    raw = load_parquet(as_abs(args.realbot), args.column)
+    duration = float(raw["time_s"][-1]) if len(raw["time_s"]) > 1 else 0.0
+    if args.native_timing:
+        t = raw["time_s"]
+        left_q = raw["left_qpos"]
+        right_q = raw["right_qpos"]
+        left_raw = raw["left_gripper_raw"]
+        right_raw = raw["right_gripper_raw"]
+    else:
+        n = max(int(round(duration * args.fps)) + 1, 1)
+        t = np.arange(n, dtype=np.float64) / args.fps
+        if duration > 0:
+            t[-1] = min(t[-1], duration)
+        left_q = resample_series(raw["time_s"], raw["left_qpos"], t)
+        right_q = resample_series(raw["time_s"], raw["right_qpos"], t)
+        left_raw = resample_series(raw["time_s"], raw["left_gripper_raw"], t)
+        right_raw = resample_series(raw["time_s"], raw["right_gripper_raw"], t)
 
-    q_ik = np.zeros((len(t), 7), dtype=np.float64)
-    w_ik = np.full(len(t), 0.1, dtype=np.float64)
-    target_pos = None
-    target_quat = None
-    has_ik = False
-    if ik_path:
-        ik = load_ik(as_abs(ik_path))
-        has_ik = True
-        q_ik = resample_series(np.asarray(ik["time_s"], dtype=np.float64), np.asarray(ik["joint_qpos"], dtype=np.float64), t)
-        w_ik = resample_series(np.asarray(ik["time_s"], dtype=np.float64), np.asarray(ik["gripper_width_m"], dtype=np.float64), t)
-        target_pos = resample_series(np.asarray(ik["time_s"], dtype=np.float64), np.asarray(ik["target_pos_m"], dtype=np.float64), t)
-        src_t = np.asarray(ik["time_s"], dtype=np.float64)
-        src_u = (src_t - src_t[0]) / max(float(src_t[-1] - src_t[0]), 1e-12)
-        dst_u = (t - t[0]) / max(float(t[-1] - t[0]), 1e-12) if len(t) > 1 else np.zeros(len(t))
-        quats = np.asarray(ik["target_quat_xyzw"], dtype=np.float64)
-        nearest = np.clip(np.searchsorted(src_u, dst_u), 0, len(src_u) - 1)
-        for i, u in enumerate(dst_u):
-            j = int(nearest[i])
-            if j > 0 and abs(src_u[j - 1] - u) < abs(src_u[j] - u):
-                nearest[i] = j - 1
-        target_quat = quats[nearest]
     return {
+        **raw,
         "time_s": t,
-        "q_real": q_real,
-        "w_real": w_real,
-        "q_ik": q_ik,
-        "w_ik": w_ik,
-        "target_pos": target_pos,
-        "target_quat": target_quat,
-        "has_ik": has_ik,
+        "left_qpos": left_q,
+        "right_qpos": right_q,
+        "left_gripper_width_m": gripper_raw_to_width(left_raw, args.gripper_open_m, args.gripper_closed_m),
+        "right_gripper_width_m": gripper_raw_to_width(right_raw, args.gripper_open_m, args.gripper_closed_m),
+        "left_gripper_raw": left_raw,
+        "right_gripper_raw": right_raw,
     }
 
 
-def step(model, data, maps, series, i: int) -> None:
+def setup(args: argparse.Namespace):
+    _, mujoco = require_runtime()
+    model = mujoco.MjModel.from_xml_path(str(as_abs(args.scene)))
+    data = mujoco.MjData(model)
+    maps = {
+        "left_arm_q": qpos_addrs(model, LEFT_ARM_JOINTS),
+        "left_gripper_q": qpos_addrs(model, LEFT_GRIPPER_JOINTS),
+        "right_arm_q": qpos_addrs(model, RIGHT_ARM_JOINTS),
+        "right_gripper_q": qpos_addrs(model, RIGHT_GRIPPER_JOINTS),
+        "left_a": actuator_ids(model, LEFT_ARM_JOINTS + LEFT_GRIPPER_JOINTS),
+        "right_a": actuator_ids(model, RIGHT_ARM_JOINTS + RIGHT_GRIPPER_JOINTS),
+    }
+    series = build_series(args)
+    return model, data, maps, series
+
+
+def step(model, data, maps: dict[str, Any], series: dict[str, Any], i: int) -> None:
     _, mujoco = require_runtime()
     data.time = float(series["time_s"][i])
-    apply_joints(data, maps["left_q"], maps["left_a"], series["q_real"][i], series["w_real"][i])
-    apply_joints(data, maps["right_q"], maps["right_a"], series["q_ik"][i], series["w_ik"][i])
-    if series["has_ik"]:
-        set_marker(data, maps["left_he_mid"], None, None)
-        right_pos = series["target_pos"][i].copy()
-        right_pos[1] += 0.9
-        set_marker(data, maps["right_he_mid"], right_pos, series["target_quat"][i])
-    else:
-        set_marker(data, maps["left_he_mid"], None, None)
-        set_marker(data, maps["right_he_mid"], None, None)
+    apply_arm(data, maps["left_arm_q"], maps["left_a"], LEFT_ARM_JOINTS, series["left_qpos"][i])
+    apply_gripper(data, maps["left_gripper_q"], maps["left_a"], LEFT_GRIPPER_JOINTS, series["left_gripper_width_m"][i])
+    apply_arm(data, maps["right_arm_q"], maps["right_a"], RIGHT_ARM_JOINTS, series["right_qpos"][i])
+    apply_gripper(data, maps["right_gripper_q"], maps["right_a"], RIGHT_GRIPPER_JOINTS, series["right_gripper_width_m"][i])
     mujoco.mj_forward(model, data)
 
 
-def resolve_maps(model) -> dict:
-    return {
-        "left_q": qpos_map(model, ""),
-        "left_a": actuator_map(model, ""),
-        "right_q": qpos_map(model, RIGHT_PREFIX),
-        "right_a": actuator_map(model, RIGHT_PREFIX),
-        "left_he_mid": mocap_id(model, "humanego_eef_marker"),
-        "right_he_mid": mocap_id(model, "r_humanego_eef_marker"),
-        "left_tcp": site_id(model, "tcp"),
-        "right_tcp": site_id(model, "r_tcp"),
-    }
-
-
-def draw_hud(frame_rgb, series, i: int) -> np.ndarray:
+def draw_hud(frame_rgb, series: dict[str, Any], i: int) -> np.ndarray:
     cv2, _ = require_runtime()
     frame = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+    episode = int(series["episode_index"][0]) if len(series["episode_index"]) else -1
     lines = [
-        f"LEFT real-bot JSONL | RIGHT {'IK npz' if series['has_ik'] else 'static zero'}  frame {i + 1}/{len(series['time_s'])}",
-        f"left gripper={series['w_real'][i]*1000:.0f}mm  right gripper={series['w_ik'][i]*1000:.0f}mm",
-        "cyan target marker appears on the right only when --ik is provided",
+        f"ARX real-bot parquet replay  frame {i + 1}/{len(series['time_s'])}  t={series['time_s'][i]:.2f}s",
+        f"episode={episode}  source={series['source_column']}",
+        f"left grip raw={series['left_gripper_raw'][i]:+.3f} width={series['left_gripper_width_m'][i]*1000:.0f}mm",
+        f"right grip raw={series['right_gripper_raw'][i]:+.3f} width={series['right_gripper_width_m'][i]*1000:.0f}mm",
     ]
     x, y = 18, 28
     for line in lines:
@@ -220,16 +245,7 @@ def draw_hud(frame_rgb, series, i: int) -> np.ndarray:
     return frame
 
 
-def setup(args):
-    _, mujoco = require_runtime()
-    model = mujoco.MjModel.from_xml_path(str(as_abs(args.dual_scene)))
-    data = mujoco.MjData(model)
-    maps = resolve_maps(model)
-    series = build_series(as_abs(args.realbot), args.ik if args.ik else None, args.fps)
-    return model, data, maps, series
-
-
-def launch_viewer(args) -> None:
+def launch_viewer(args: argparse.Namespace) -> None:
     _, mujoco = require_runtime()
     model, data, maps, series = setup(args)
     period = 1.0 / max(args.fps, 1e-9)
@@ -247,7 +263,14 @@ def launch_viewer(args) -> None:
         while viewer.is_running():
             with viewer.lock():
                 step(model, data, maps, series, i)
-            viewer.set_texts((None, None, f"LEFT real-bot\n{i + 1}/{len(series['time_s'])}", f"RIGHT {'IK' if series['has_ik'] else 'static zero'}"))
+            viewer.set_texts(
+                (
+                    None,
+                    None,
+                    f"ARX real-bot\n{i + 1}/{len(series['time_s'])}",
+                    f"right q {np.array2string(series['right_qpos'][i], precision=2)}",
+                )
+            )
             viewer.sync()
             if i < len(series["time_s"]) - 1:
                 i += 1
@@ -256,7 +279,7 @@ def launch_viewer(args) -> None:
             time.sleep(period)
 
 
-def render_mp4(args) -> None:
+def render_mp4(args: argparse.Namespace) -> None:
     cv2, mujoco = require_runtime()
     model, data, maps, series = setup(args)
     out = as_abs(args.out)
@@ -276,21 +299,38 @@ def render_mp4(args) -> None:
     finally:
         writer.release()
         renderer.close()
+
+    summary = {
+        "realbot": str(as_abs(args.realbot)),
+        "scene": str(as_abs(args.scene)),
+        "video": str(out),
+        "frames": int(len(series["time_s"])),
+        "duration_s": float(series["time_s"][-1]) if len(series["time_s"]) else 0.0,
+        "source_column": series["source_column"],
+        "feature_names": series["feature_names"],
+        "left_gripper_raw_minmax": [float(np.min(series["left_gripper_raw"])), float(np.max(series["left_gripper_raw"]))],
+        "right_gripper_raw_minmax": [float(np.min(series["right_gripper_raw"])), float(np.max(series["right_gripper_raw"]))],
+    }
+    out.with_suffix(".json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"Wrote {out}")
+    print(f"Wrote {out.with_suffix('.json')}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dual-scene", default=str(MUJOCO_NERO_DUAL_SCENE))
-    parser.add_argument("--realbot", default="examples/ego_nero_easy_real_bot.jsonl")
-    parser.add_argument("--ik", default="", help="Optional IK npz. If omitted, right robot remains at zero pose.")
-    parser.add_argument("--out", default="outputs/new_pipeline/replays/realbot_vs_ik.mp4")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--scene", default=str(MUJOCO_ARX_SCENE))
+    parser.add_argument("--realbot", default=DEFAULT_REALBOT)
+    parser.add_argument("--column", choices=["observation.state", "action"], default="observation.state")
+    parser.add_argument("--out", default=DEFAULT_OUT)
     parser.add_argument("--viewer", action="store_true")
     parser.add_argument("--once", action="store_true")
-    parser.add_argument("--loops", type=int, default=2)
+    parser.add_argument("--loops", type=int, default=1)
+    parser.add_argument("--native-timing", action="store_true", help="Use parquet timestamps directly instead of FPS resampling.")
     parser.add_argument("--fps", type=float, default=30.0)
-    parser.add_argument("--width", type=int, default=1600)
+    parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--gripper-open-m", type=float, default=gripper_open_default())
+    parser.add_argument("--gripper-closed-m", type=float, default=gripper_closed_default())
     parser.add_argument("--gl-backend", choices=["auto", "glfw", "egl", "osmesa"], default="auto")
     args = parser.parse_args()
     load_runtime(args.viewer, args.gl_backend)

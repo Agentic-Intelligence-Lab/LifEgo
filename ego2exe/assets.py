@@ -1,19 +1,11 @@
 #!/usr/bin/env python3
-"""Scene / sensor assets used for HumanEgo ↔ Nero calibration and correction.
+"""Scene / sensor assets used for HumanEgo <-> ARX AC one conversion.
 
-Central place for:
-  - RGB camera intrinsics / extrinsics (OpenCV convention)
-  - Robot platform geometry (table, base frame, TCP offset, …)
-  - Other fixed transforms that exports and MuJoCo replay should share
-
-Fill numbers here when calibrations are ready; callers should import from this
-module instead of scattering hard-coded defaults.
-
-Convention notes (Nero setup, current pipeline):
-  - Robot base: origin at table height under the arm; +z up; +x back, -x front;
-    +y robot-right, -y robot-left.
+Convention notes:
+  - ARX base: +X is the normal forward workspace direction, +Z is up.
   - Camera optical (OpenCV): +x image-right, +y image-down, +z optical forward.
-  - Tool-centric TCP: p_tcp = p_flange + R_flange @ [0.13, 0, 0] (link7 +X).
+  - HEAD camera is mounted on the middle pillar and looks 45 deg downward
+    toward the +X workspace.
 """
 
 from __future__ import annotations
@@ -21,18 +13,23 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+import struct
 
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-EGO2EXE_ROOT = Path(__file__).resolve().parent
-MUJOCO_NERO_SCENE = EGO2EXE_ROOT / "assets" / "mujoco_nero_scene" / "scene.xml"
-MUJOCO_NERO_DUAL_SCENE = EGO2EXE_ROOT / "assets" / "mujoco_nero_scene" / "scene_dual_compare.xml"
+EGO2EXE_ARX_ROOT = Path(__file__).resolve().parent
 
+ARX_ACONE_URDF_ROOT = REPO_ROOT / "thirdparty" / "ARX_Model" / "AC one" / "URDF" / "ACone"
+MUJOCO_ARX_SCENE = EGO2EXE_ARX_ROOT / "assets" / "mujoco_arx_scene" / "scene.xml"
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# base_link.STL contains the rectangular support base. Its bottom is at about
+# z=-0.085 m and its top/mounting plane is around z=0 in the robot base frame.
+ARX_BASE_BOTTOM_Z_M = -0.085
+ARX_TABLE_TOP_Z_M = ARX_BASE_BOTTOM_Z_M
+ARX_TABLE_HALF_THICKNESS_M = 0.025
+ARX_FLOOR_BELOW_TABLE_M = 0.70
+
 
 def eye4() -> np.ndarray:
     return np.eye(4, dtype=np.float64)
@@ -46,36 +43,97 @@ def empty_mat3() -> np.ndarray:
     return np.full((3, 3), np.nan, dtype=np.float64)
 
 
-# ---------------------------------------------------------------------------
-# Camera
-# ---------------------------------------------------------------------------
+def _read_stl_vertices(path: Path) -> np.ndarray:
+    raw = path.read_bytes()
+    if len(raw) >= 84:
+        tri_count = struct.unpack("<I", raw[80:84])[0]
+        expected_len = 84 + tri_count * 50
+        if expected_len == len(raw):
+            vertices = np.empty((tri_count * 3, 3), dtype=np.float64)
+            offset = 84
+            out_i = 0
+            for _ in range(tri_count):
+                offset += 12
+                for _ in range(3):
+                    vertices[out_i] = struct.unpack("<3f", raw[offset : offset + 12])
+                    offset += 12
+                    out_i += 1
+                offset += 2
+            return vertices
+
+    vertices = []
+    for line in raw.decode("utf-8", errors="ignore").splitlines():
+        parts = line.strip().split()
+        if len(parts) == 4 and parts[0].lower() == "vertex":
+            vertices.append([float(parts[1]), float(parts[2]), float(parts[3])])
+    if not vertices:
+        raise ValueError(f"Could not read STL vertices from {path}")
+    return np.asarray(vertices, dtype=np.float64)
+
+
+def estimate_head_camera_extrinsics_from_base_mesh(
+    arx_root: Path = ARX_ACONE_URDF_ROOT,
+    *,
+    pitch_down_deg: float = 45.0,
+    head_min_z_m: float = 0.20,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Estimate HEAD camera pose from the high center component in base_link.STL.
+
+    The AC one URDF does not expose a separate camera link. The no-handle
+    base_link mesh contains the middle head/camera component, whose high vertices
+    identify the mounted camera housing. Position is estimated at the front face
+    center of that high component. Orientation uses the stated mechanical
+    convention: optical +Z points toward +X and down by pitch_down_deg.
+
+    Returns:
+      T_cam_in_base, selected_bounds_min, selected_bounds_max.
+    """
+
+    mesh_path = arx_root / "meshes" / "base_link.STL"
+    vertices = _read_stl_vertices(mesh_path)
+    high = vertices[vertices[:, 2] > head_min_z_m]
+    if len(high) == 0:
+        raise ValueError(f"No head/camera vertices above z={head_min_z_m} in {mesh_path}")
+
+    bounds_min = high.min(axis=0)
+    bounds_max = high.max(axis=0)
+    pitch = np.deg2rad(float(pitch_down_deg))
+
+    cam_x = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+    cam_z = np.array([np.cos(pitch), 0.0, -np.sin(pitch)], dtype=np.float64)
+    cam_y = np.cross(cam_z, cam_x)
+    cam_y /= np.linalg.norm(cam_y)
+
+    T_cam_in_base = np.eye(4, dtype=np.float64)
+    T_cam_in_base[:3, 0] = cam_x
+    T_cam_in_base[:3, 1] = cam_y
+    T_cam_in_base[:3, 2] = cam_z
+    T_cam_in_base[:3, 3] = np.array(
+        [
+            bounds_max[0],
+            0.5 * (bounds_min[1] + bounds_max[1]),
+            0.5 * (bounds_min[2] + bounds_max[2]),
+        ],
+        dtype=np.float64,
+    )
+    return T_cam_in_base, bounds_min, bounds_max
+
 
 @dataclass
 class CameraIntrinsics:
-    """Pinhole + optional radial/tangential distortion (OpenCV).
+    """Pinhole camera intrinsics plus distortion metadata."""
 
-    Units: pixels for fx/fy/cx/cy; distortion coefficients OpenCV-order.
-    Leave fields as None / empty until a calibration is written.
-    """
-
-    # Image size used for the calibration (not necessarily capture resolution).
     width: int | None = None
     height: int | None = None
-
-    # Focal length and principal point.
     fx: float | None = None
     fy: float | None = None
     cx: float | None = None
     cy: float | None = None
-
-    # OpenCV distortion: [k1, k2, p1, p2, k3, ...]  (empty = unused)
+    distortion_model: str | None = None
     dist_coeffs: np.ndarray | None = None
-
-    # Free-form notes (serial number, capture date, …).
     notes: str = ""
 
     def K(self) -> np.ndarray | None:
-        """3×3 camera matrix, or None if incomplete."""
         if None in (self.fx, self.fy, self.cx, self.cy):
             return None
         return np.array(
@@ -93,25 +151,15 @@ class CameraIntrinsics:
 
 @dataclass
 class CameraExtrinsics:
-    """Camera pose relative to the robot base / table.
+    """Camera pose relative to ARX base."""
 
-    Prefer filling T_cam_in_base (4×4) when full SE(3) is available.
-    The pitch / height / table-target fields are the softer geometric
-    description used by the current export scripts — optional once SE(3)
-    is measured.
-    """
-
-    # Full transform: p_cam expressed in robot base, R columns = cam axes in base.
-    T_cam_in_base: np.ndarray | None = None  # (4, 4)
-
-    # Soft geometric description (table frame):
+    T_cam_in_base: np.ndarray | None = None
     camera_height_m: float | None = None
     pitch_down_deg: float | None = None
-    # Optical-axis direction projected onto table (xy), typically toward -x.
-    optical_projection_base: np.ndarray | None = None  # (3,)
-    # Table hit point of the optical axis [x, y, 0].
-    camera_target_base: np.ndarray | None = None  # (3,)
-
+    optical_projection_base: np.ndarray | None = None
+    camera_target_base: np.ndarray | None = None
+    source_mesh_bounds_min_m: np.ndarray | None = None
+    source_mesh_bounds_max_m: np.ndarray | None = None
     notes: str = ""
 
     def is_filled(self) -> bool:
@@ -120,229 +168,153 @@ class CameraExtrinsics:
 
 @dataclass
 class CameraAsset:
-    """One RGB (or other) camera on the platform."""
-
-    name: str = "scene_rgb"
+    name: str = "head_rgb"
     intrinsics: CameraIntrinsics = field(default_factory=CameraIntrinsics)
     extrinsics: CameraExtrinsics = field(default_factory=CameraExtrinsics)
-    # Capture stream metadata (fps, rotate, backend) — fill when useful.
     capture: dict[str, Any] = field(default_factory=dict)
-
-
-# ---------------------------------------------------------------------------
-# AprilTag board (metric ruler / base anchor)
-# ---------------------------------------------------------------------------
-
-@dataclass
-class AprilTagBoard:
-    """Known AprilTag geometry for scale + T_cam_in_base estimation.
-
-    Measured / printed sizes live here; detection is in
-    patches/estimate_scale_apriltag.py.
-    """
-
-    dictionary: str = "DICT_APRILTAG_36h11"
-    # Physical black-square edge length in meters (required for metric PnP).
-    tag_size_m: float | None = None
-    # Tag ids present (empty = any).
-    tag_ids: list[int] = field(default_factory=list)
-    # Pose of primary tag (id = tag_ids[0] if set) in robot base.
-    T_tag_in_base: np.ndarray | None = None  # (4, 4)
-    notes: str = ""
 
 
 @dataclass
 class TcpOffset:
-    """TCP definition in the flange (link7) frame.
-
-    Tool-centric pipeline default is along flange +X; controller JSONL often
-    logged along flange +Z — keep both places blank until pinned.
-    """
-
-    # Translation flange → TCP in flange frame [m].
-    t_flange_m: np.ndarray | None = None  # (3,)
-    # Optional fixed rotation flange → TCP (as 3×3 or leave None = identity).
-    R_flange: np.ndarray | None = None  # (3, 3)
+    t_flange_m: np.ndarray | None = None
+    R_flange: np.ndarray | None = None
     notes: str = ""
 
 
 @dataclass
 class RobotPlatform:
-    """Fixed geometry of one Nero (or compatible) tabletop setup."""
-
-    name: str = "nero_table"
-
-    # Robot base pose in world / table frame (usually identity on z=0).
-    T_base_in_world: np.ndarray | None = None  # (4, 4)
-
-    # Table plane: point + normal in base/world (z-up tables: n = [0,0,1]).
-    table_point_m: np.ndarray | None = None  # (3,)
-    table_normal: np.ndarray | None = None  # (3,)
-
-    # Workcell extents / origin hints (optional for viz).
-    workspace_center_m: np.ndarray | None = None  # (3,)
-    workspace_half_size_m: np.ndarray | None = None  # (3,)
-
-    # TCP definition used for IK / site:tcp.
-    tcp: TcpOffset = field(default_factory=TcpOffset)
-
-    # Gripper open/closed widths [m] for binary grasp map (optional defaults).
+    name: str = "arx_acone"
+    T_base_in_world: np.ndarray | None = None
+    table_top_z_m: float = 0.0
+    floor_z_m: float = -0.70
+    table_center_m: np.ndarray | None = None
+    table_half_size_m: np.ndarray | None = None
+    workspace_center_m: np.ndarray | None = None
+    workspace_half_size_m: np.ndarray | None = None
+    left_tcp: TcpOffset = field(default_factory=TcpOffset)
+    right_tcp: TcpOffset = field(default_factory=TcpOffset)
     gripper_open_m: float | None = None
     gripper_closed_m: float | None = None
-
-    # URDF / mesh root on this machine (optional path string).
     urdf_root: str | None = None
-
     notes: str = ""
 
-
-# ---------------------------------------------------------------------------
-# Bundle: one calibrated cell (platform + cameras + misc)
-# ---------------------------------------------------------------------------
 
 @dataclass
 class SceneAssets:
-    """Everything needed to transform HumanEgo data into robot base for a cell."""
-
     name: str = ""
     platform: RobotPlatform = field(default_factory=RobotPlatform)
     cameras: dict[str, CameraAsset] = field(default_factory=dict)
-    apriltag: AprilTagBoard = field(default_factory=AprilTagBoard)
-
-    # Extra named rigid transforms (e.g. hand→EE, T_align) — fill later.
-    # Values should be (4, 4) float64 when set.
     extra_transforms: dict[str, np.ndarray | None] = field(default_factory=dict)
-
     notes: str = ""
 
-    def camera(self, name: str = "scene_rgb") -> CameraAsset | None:
+    def camera(self, name: str = "head_rgb") -> CameraAsset | None:
         return self.cameras.get(name)
 
 
-# ---------------------------------------------------------------------------
-# Registry — fill entries as calibrations land
-# ---------------------------------------------------------------------------
+def _make_head_camera_extrinsics() -> CameraExtrinsics:
+    T_cam_in_base, bounds_min, bounds_max = estimate_head_camera_extrinsics_from_base_mesh()
+    optical = T_cam_in_base[:3, 2]
+    pos = T_cam_in_base[:3, 3]
+    table_top_z = ARX_TABLE_TOP_Z_M
+    t_table = (table_top_z - pos[2]) / optical[2]
+    target = pos + t_table * optical
+    return CameraExtrinsics(
+        T_cam_in_base=T_cam_in_base,
+        camera_height_m=float(pos[2] - table_top_z),
+        pitch_down_deg=45.0,
+        optical_projection_base=np.array([1.0, 0.0, 0.0], dtype=np.float64),
+        camera_target_base=target,
+        source_mesh_bounds_min_m=bounds_min,
+        source_mesh_bounds_max_m=bounds_max,
+        notes="Estimated from URDF/ACone/meshes/base_link.STL high head/camera vertices "
+        "(z > 0.20 m). Position is the high component front-face center; orientation uses "
+        "the stated AC one HEAD camera mount: optical axis toward +X, pitched down 45 deg.",
+    )
 
-# Blank primary cell: Nero table + external scene RGB (HumanEgo capture).
-# Replace Nones with measured values; do not invent numbers here.
-NERO_TABLE_V1 = SceneAssets(
-    name="nero_table_v1",
+
+ARX_ACONE_HEAD_V1 = SceneAssets(
+    name="arx_acone_head_v1",
     platform=RobotPlatform(
-        name="nero_table",
+        name="arx_acone",
         T_base_in_world=None,
-        table_point_m=np.array([0.0, 0.0, 0.0]),
-        table_normal=np.array([0.0, 0.0, 1.0]),
-        workspace_center_m=None,
-        workspace_half_size_m=None,
-        tcp=TcpOffset(
-            t_flange_m=np.array([0.13, 0.0, 0.0]),
-            R_flange=None,
-            notes="Tool-centric TCP is flange +X 0.13 m in current MuJoCo scene; "
-            "controller JSONL historically used flange +Z 0.13 m. "
-            "Verified against site:tcp with patches/view_nero_zero_pose_frames.py.",
+        table_top_z_m=ARX_TABLE_TOP_Z_M,
+        floor_z_m=ARX_TABLE_TOP_Z_M - ARX_FLOOR_BELOW_TABLE_M,
+        table_center_m=np.array(
+            [0.30, 0.0, ARX_TABLE_TOP_Z_M - ARX_TABLE_HALF_THICKNESS_M],
+            dtype=np.float64,
         ),
-        # Copied from existing pipeline defaults (solve_nero_eef_ik.py --gripper-open-m /
-        # --gripper-closed-m); not independently re-measured here.
-        gripper_open_m=0.1,
+        table_half_size_m=np.array([0.90, 0.55, ARX_TABLE_HALF_THICKNESS_M], dtype=np.float64),
+        workspace_center_m=np.array([0.40, 0.0, ARX_TABLE_TOP_Z_M], dtype=np.float64),
+        workspace_half_size_m=np.array([0.32, 0.28, 0.002], dtype=np.float64),
+        left_tcp=TcpOffset(
+            t_flange_m=np.array([0.105, 0.0018, -0.0063], dtype=np.float64),
+            R_flange=None,
+            notes="Approximate midpoint between left gripper fingers in left_link6 frame.",
+        ),
+        right_tcp=TcpOffset(
+            t_flange_m=np.array([0.105, 0.0018, -0.0063], dtype=np.float64),
+            R_flange=None,
+            notes="Approximate midpoint between right gripper fingers in right_link16 frame.",
+        ),
+        gripper_open_m=0.088,
         gripper_closed_m=0.0,
-        urdf_root=None,  # handled via AGX_ARM_URDF_ROOT env var in build_nero_mujoco_scene.py
-        notes="",
+        urdf_root=str(ARX_ACONE_URDF_ROOT),
+        notes="ARX AC one no-handle model. Base convention: +X forward workspace, +Z up. "
+        "Vendor URDF names put left_* at positive Y and right_* at negative Y.",
     ),
     cameras={
-        "scene_rgb": CameraAsset(
-            name="scene_rgb",
+        "head_rgb": CameraAsset(
+            name="head_rgb",
             intrinsics=CameraIntrinsics(
-                width=1280,
-                height=720,
-                fx=909.57177734375,
-                fy=908.9627075195312,
-                cx=656.6723022460938,
-                cy=357.9732666015625,
-                dist_coeffs=np.array([0.0, 0.0, 0.0, 0.0, 0.0]),
-                notes="RealSense D435I (serial 243222074905, fw 5.15.1.55), 1280x720 Color "
-                "stream, factory intrinsics from patches/camera_insrinsics.json. "
-                "No distortion coefficients supplied; assumed zero.",
-            ),
-            extrinsics=CameraExtrinsics(
-                T_cam_in_base=np.array(
-                    [
-                        [-0.06640093907919233, 0.8931516773924303, -0.4448269286593267, -0.028984821637799026],
-                        [0.9976939458559392, 0.0657137003644242, -0.01698528736351997, -0.4375444455059773],
-                        [0.014060785604225665, -0.4449289727085697, -0.8954554726800706, 0.5648349184610941],
-                        [0.0, 0.0, 0.0, 1.0],
-                    ]
+                width=640,
+                height=480,
+                fx=393.030548,
+                fy=392.679291,
+                cx=312.918335,
+                cy=240.937149,
+                distortion_model="inverse_brown_conrady",
+                dist_coeffs=np.array(
+                    [-0.050604139, 0.056275558, 0.000794928, 0.000940709, -0.018167889],
+                    dtype=np.float64,
                 ),
-                camera_height_m=None,
-                pitch_down_deg=None,
-                optical_projection_base=None,
-                camera_target_base=None,
-                notes="Solved by patches/calibrate_realsense_extrinsic_from_apriltags.py from "
-                "tags 1+2 top_left corners (examples/calib/tag_corners_base.json) + "
-                "patches/nero_datacollect/pyAgxArm-master/output4.png, reprojection RMSE "
-                "1.012 px. Full result: outputs/camera_extrinsics/camera_extrinsics.json. "
-                "Supersedes the soft camera_height_m/pitch_down_deg estimate used by "
-                "export_robot_eef_from_wilor.py's CLI defaults. "
-                "NOTE: camera position shifted substantially vs. the prior output1.png-based "
-                "solve (z: 0.831m -> 0.604m, ~23cm), and RMSE roughly doubled (0.477 -> 1.012 px) "
-                "-- verify the camera/rig hasn't moved and this is the intended calibration before trusting it.",
+                notes="HEAD camera RealSense D405 intrinsics for 640x480.",
             ),
-            capture={},
+            extrinsics=_make_head_camera_extrinsics(),
+            capture={"device": "RealSense D405", "resolution": [640, 480]},
         ),
     },
-    apriltag=AprilTagBoard(
-        dictionary="DICT_APRILTAG_36h11",
-        tag_size_m=0.05,
-        tag_ids=[1, 2],
-        # Not filled: our calibration solves each tag's yaw jointly with the camera pose
-        # (see solved_yaw_deg_by_tag in camera_extrinsics.json) but doesn't need or emit a
-        # single T_tag_in_base — T_cam_in_base above was solved directly, so this is not
-        # required for the current pipeline. Fill in only if some other script needs it.
-        T_tag_in_base=None,
-        notes="tag_corners_base.json collected via "
-        "patches/nero_datacollect/pyAgxArm-master/collect_apriltag_corners.py "
-        "(top_left corner only, tcp_offset=0.13 m). "
-        "Use patches/estimate_scale_apriltag.py to fill VGGT depth scale separately.",
-    ),
     extra_transforms={
-        # = inv(export_robot_eef_from_wilor.DEFAULT_T_ALIGN); this rotation is self-inverse.
         "T_hand_to_ee": np.array(
             [
                 [-1.0, 0.0, 0.0, 0.0],
                 [0.0, 0.0, 1.0, 0.0],
                 [0.0, 1.0, 0.0, 0.0],
                 [0.0, 0.0, 0.0, 1.0],
-            ]
+            ],
+            dtype=np.float64,
         ),
-        # = apply_humanego_eef_axis_correction.DEFAULT_C_REAL_FROM_HUMANEGO, embedded as a
-        # 4x4 (rotation only, zero translation): real x=HumanEgo z, real y=-HumanEgo y,
-        # real z=HumanEgo x. Empirically observed, not derived from a calibration script.
         "T_ee_axis_correct": np.array(
             [
                 [0.0, 0.0, 1.0, 0.0],
                 [0.0, -1.0, 0.0, 0.0],
                 [1.0, 0.0, 0.0, 0.0],
                 [0.0, 0.0, 0.0, 1.0],
-            ]
+            ],
+            dtype=np.float64,
         ),
     },
-    notes="Primary Nero humanego→robot cell. Camera intrinsics calibrated 2026-08-10; "
-    "extrinsics re-synced 2026-08-13 from outputs/camera_extrinsics/camera_extrinsics.json "
-    "(solved 2026-08-12 against output4.png). AprilTag geometry calibrated 2026-08-10; "
-    "workspace_center/half_size and T_base_in_world still blank (not needed by the current "
-    "pipeline).",
+    notes="Primary ARX AC one HumanEgo cell using the built-in HEAD camera.",
 )
 
 
-# Active default for scripts that want a single entry point.
-DEFAULT_ASSETS: SceneAssets = NERO_TABLE_V1
+DEFAULT_ASSETS: SceneAssets = ARX_ACONE_HEAD_V1
 
 
 def get_assets(name: str | None = None) -> SceneAssets:
-    """Look up a named asset bundle; name=None → DEFAULT_ASSETS."""
     if name is None or name == DEFAULT_ASSETS.name:
         return DEFAULT_ASSETS
     registry = {
-        NERO_TABLE_V1.name: NERO_TABLE_V1,
+        ARX_ACONE_HEAD_V1.name: ARX_ACONE_HEAD_V1,
     }
     if name not in registry:
         raise KeyError(f"Unknown assets bundle {name!r}; known: {sorted(registry)}")
@@ -350,19 +322,19 @@ def get_assets(name: str | None = None) -> SceneAssets:
 
 
 __all__ = [
-    "CameraIntrinsics",
-    "CameraExtrinsics",
+    "ARX_ACONE_HEAD_V1",
+    "ARX_ACONE_URDF_ROOT",
     "CameraAsset",
-    "AprilTagBoard",
-    "TcpOffset",
+    "CameraExtrinsics",
+    "CameraIntrinsics",
+    "DEFAULT_ASSETS",
+    "MUJOCO_ARX_SCENE",
     "RobotPlatform",
     "SceneAssets",
-    "NERO_TABLE_V1",
-    "DEFAULT_ASSETS",
-    "MUJOCO_NERO_SCENE",
-    "MUJOCO_NERO_DUAL_SCENE",
-    "get_assets",
-    "eye4",
-    "empty_vec3",
+    "TcpOffset",
     "empty_mat3",
+    "empty_vec3",
+    "estimate_head_camera_extrinsics_from_base_mesh",
+    "eye4",
+    "get_assets",
 ]

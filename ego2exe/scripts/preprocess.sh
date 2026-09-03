@@ -9,11 +9,11 @@ Usage:
 Runs the ego2exe preprocessing pipeline:
   1. WiLoR hand reconstruction
   2. EEF export in robot base
-  3. mink IK retargeting
-  4. headless EEF and IK replay MP4 rendering
+  3. ARX right-arm mink IK retargeting
+  4. headless ARX EEF replay MP4 rendering
 
 Environment overrides:
-  PY                    Python executable (default: python)
+  PY                    Python executable (default: /home/ymq/miniconda3/envs/lifego/bin/python if present, else python)
   GL_BACKEND            MuJoCo render backend for MP4 replay (default: egl)
   WILOR_PRETRAINED_DIR  WiLoR checkpoint/cache directory
   HAND_KEY              hand_r or hand_l (default: hand_r)
@@ -38,7 +38,13 @@ REPO_ROOT="$(cd "${EGO2EXE_DIR}/.." && pwd)"
 
 VIDEO="$1"
 OUT_ROOT="${2:-outputs/new_pipeline}"
-PY="${PY:-python}"
+if [[ -z "${PY:-}" ]]; then
+  if [[ -x "/home/ymq/miniconda3/envs/lifego/bin/python" ]]; then
+    PY="/home/ymq/miniconda3/envs/lifego/bin/python"
+  else
+    PY="python"
+  fi
+fi
 GL_BACKEND="${GL_BACKEND:-egl}"
 HAND_KEY="${HAND_KEY:-hand_r}"
 RUN_IK="${RUN_IK:-1}"
@@ -61,11 +67,10 @@ fi
 SESSION_DIR="${OUT_ROOT_ABS}/${SESSION_NAME}"
 EEF_DIR="${SESSION_DIR}/robot_eef_scene_camera_axis_corrected"
 EEF_JSON="${EEF_DIR}/robot_eef_trajectory.json"
-IK_DIR="${SESSION_DIR}/nero_eef_ik"
-IK_NPZ="${IK_DIR}/nero_eef_ik.npz"
+IK_DIR="${SESSION_DIR}/arx_right_eef_ik"
+IK_NPZ="${IK_DIR}/arx_right_eef_ik.npz"
 REPLAY_DIR="${SESSION_DIR}/replays"
 EEF_MP4="${REPLAY_DIR}/${SESSION_NAME}_eef.mp4"
-IK_MP4="${REPLAY_DIR}/${SESSION_NAME}_ik.mp4"
 
 cd "${REPO_ROOT}"
 mkdir -p "${REPLAY_DIR}"
@@ -98,31 +103,23 @@ echo "=== 2/4 Export EEF trajectory ==="
   --hand-key "${HAND_KEY}"
 
 echo
-echo "=== 3/4 Retarget EEF with mink ==="
+echo "=== 3/4 Retarget EEF with ARX right-arm mink ==="
 if [[ "${RUN_IK}" == "1" ]]; then
-  "${PY}" ego2exe/retarget_with_mink.py \
+  "${PY}" ego2exe/retarget_with_mink_arx.py \
     --eef "${EEF_JSON}" \
-    --out "${IK_NPZ}"
+    --out "${IK_NPZ}" \
+    --target-name right_tcp
 else
   echo "Skipping IK because RUN_IK=${RUN_IK}"
 fi
 
 echo
-echo "=== 4/4 Render replay MP4s ==="
+echo "=== 4/4 Render ARX EEF replay MP4 ==="
 if [[ "${RUN_REPLAY}" == "1" ]]; then
-  "${PY}" ego2exe/replay_eef_mujoco.py \
+  "${PY}" ego2exe/replay_eef_arx_mujoco.py \
     --eef "${EEF_JSON}" \
     --out "${EEF_MP4}" \
     --gl-backend "${GL_BACKEND}"
-
-  if [[ -f "${IK_NPZ}" ]]; then
-    "${PY}" ego2exe/replay_ik_mujoco.py \
-      --ik "${IK_NPZ}" \
-      --out "${IK_MP4}" \
-      --gl-backend "${GL_BACKEND}"
-  else
-    echo "Skipping IK replay because IK file is missing: ${IK_NPZ}"
-  fi
 else
   echo "Skipping replay because RUN_REPLAY=${RUN_REPLAY}"
 fi
@@ -132,4 +129,3 @@ echo "=== done ==="
 echo "EEF:        ${EEF_JSON}"
 echo "IK:         ${IK_NPZ}"
 echo "EEF replay: ${EEF_MP4}"
-echo "IK replay:  ${IK_MP4}"
