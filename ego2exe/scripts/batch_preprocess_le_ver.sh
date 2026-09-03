@@ -29,7 +29,10 @@ Options:
   --cohort NAME        only this cohort (default: every *_ego_* dir of the task)
   --data-root DIR      source root (default: ../DATA_new relative to the repo)
   --out-root DIR       output root (default: outputs)
-  --hand2gripper-mode M  humanego (default) or pinch_plane
+  --hand2gripper-mode M  humanego (default), pinch_plane, qwen, or finger_center_f_primary
+  --grasp-close-ratio R  tip/palm below which the gripper counts as closed
+  --grasp-open-ratio R   tip/palm above which it counts as open (hysteresis band)
+  --grasp-min-frames N   drop open/closed runs shorter than N frames
   --forward-seed S     index_tip (default) or finger_mcp_centroid; pinch_plane only
   --hand-key K         hand_r (default) or hand_l
   --hands-file NAME    e.g. wilor_hands.json
@@ -65,6 +68,9 @@ DATA_ROOT="${REPO_ROOT}/../DATA_new"
 OUT_ROOT="outputs"
 H2G_MODE=""
 FORWARD_SEED=""
+GRASP_CLOSE=""
+GRASP_OPEN=""
+GRASP_MIN_FRAMES=""
 HAND_KEY="hand_r"
 HANDS_FILE=""
 NO_AXIS_CORRECTION=0
@@ -84,6 +90,9 @@ while [[ $# -gt 0 ]]; do
     --out-root)             OUT_ROOT="$2"; shift 2 ;;
     --hand2gripper-mode)    H2G_MODE="$2"; shift 2 ;;
     --forward-seed)         FORWARD_SEED="$2"; shift 2 ;;
+    --grasp-close-ratio)    GRASP_CLOSE="$2"; shift 2 ;;
+    --grasp-open-ratio)     GRASP_OPEN="$2"; shift 2 ;;
+    --grasp-min-frames)     GRASP_MIN_FRAMES="$2"; shift 2 ;;
     --hand-key)             HAND_KEY="$2"; shift 2 ;;
     --hands-file)           HANDS_FILE="$2"; shift 2 ;;
     --no-axis-correction)   NO_AXIS_CORRECTION=1; shift ;;
@@ -213,6 +222,9 @@ EXPORT_ARGS=(--hand-key "${HAND_KEY}")
 [[ ${NO_AXIS_CORRECTION} -eq 1 ]] && EXPORT_ARGS+=(--no-axis-correction)
 [[ -n "${H2G_MODE}" ]] && EXPORT_ARGS+=(--hand2gripper-mode "${H2G_MODE}")
 [[ -n "${FORWARD_SEED}" ]] && EXPORT_ARGS+=(--forward-seed "${FORWARD_SEED}")
+[[ -n "${GRASP_CLOSE}" ]] && EXPORT_ARGS+=(--grasp-close-ratio "${GRASP_CLOSE}")
+[[ -n "${GRASP_OPEN}" ]] && EXPORT_ARGS+=(--grasp-open-ratio "${GRASP_OPEN}")
+[[ -n "${GRASP_MIN_FRAMES}" ]] && EXPORT_ARGS+=(--grasp-min-frames "${GRASP_MIN_FRAMES}")
 
 N_OK=0; N_FAIL=0
 FAILED=()

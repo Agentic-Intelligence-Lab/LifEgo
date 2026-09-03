@@ -61,10 +61,62 @@ def load_camera_from_assets() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 def make_hand2gripper_mode(
     mode: str = HumanEgoMode.MODE_NAME,
     forward_seed: str | None = None,
+    grasp_close_ratio: float | None = None,
+    grasp_open_ratio: float | None = None,
+    grasp_min_frames: int | None = None,
 ) -> HumanEgoMode:
     T_hand_to_ee = DEFAULT_ASSETS.extra_transforms.get("T_hand_to_ee")
     T_hand_from_eef = None if T_hand_to_ee is None else np.linalg.inv(np.array(T_hand_to_ee, dtype=np.float64))
-    return make_mode(mode, forward_seed=forward_seed, T_hand_from_eef=T_hand_from_eef)
+    return make_mode(
+        mode,
+        forward_seed=forward_seed,
+        T_hand_from_eef=T_hand_from_eef,
+        grasp_close_ratio=grasp_close_ratio,
+        grasp_open_ratio=grasp_open_ratio,
+        grasp_min_frames=grasp_min_frames,
+    )
+
+
+def debounce_grasp(states: list[int | None], min_frames: int) -> tuple[list[int | None], int]:
+    """Absorb runs shorter than ``min_frames`` into the state before them.
+
+    Hysteresis removes chatter around the threshold, but a genuine brief
+    excursion - a hand momentarily occluded, one bad reconstruction - still
+    yields a one-frame toggle that downstream event matching counts as a real
+    open/close pair. Leading and trailing runs are left alone: there is no
+    previous state to absorb them into, and an episode legitimately starting in
+    a short state should not be rewritten.
+
+    Returns the corrected states and how many frames were changed.
+    """
+    if min_frames <= 1:
+        return states, 0
+    idx = [i for i, s in enumerate(states) if s is not None]
+    if len(idx) < 3:
+        return states, 0
+
+    seq = [states[i] for i in idx]
+    changed = 0
+    while True:
+        bounds = [0]
+        for j in range(1, len(seq)):
+            if seq[j] != seq[j - 1]:
+                bounds.append(j)
+        bounds.append(len(seq))
+        for b in range(1, len(bounds) - 2):  # skip the first and last run
+            a, z = bounds[b], bounds[b + 1]
+            if z - a < min_frames:
+                for j in range(a, z):
+                    seq[j] = seq[a - 1]
+                changed += z - a
+                break
+        else:
+            break
+
+    out = list(states)
+    for pos, j in enumerate(idx):
+        out[j] = seq[pos]
+    return out, changed
 
 
 def validate_axis_correction(correction: np.ndarray) -> np.ndarray:
@@ -94,7 +146,13 @@ def export_eef(args: argparse.Namespace) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     T_base_in_cam, T_cam_in_base, p_cam_in_base = load_camera_from_assets()
-    hand2gripper = make_hand2gripper_mode(args.hand2gripper_mode, args.forward_seed)
+    hand2gripper = make_hand2gripper_mode(
+        args.hand2gripper_mode,
+        args.forward_seed,
+        grasp_close_ratio=args.grasp_close_ratio,
+        grasp_open_ratio=args.grasp_open_ratio,
+        grasp_min_frames=args.grasp_min_frames,
+    )
     axis_correction = validate_axis_correction(DEFAULT_C_REAL_FROM_HUMANEGO)
     apply_correction = not args.no_axis_correction
 
@@ -148,11 +206,29 @@ def export_eef(args: argparse.Namespace) -> None:
                 )
         records.append(rec)
 
+    # Debounce needs the whole sequence, so it runs after the per-frame pass.
+    grasp_debounced = 0
+    if hand2gripper.grasp_min_frames > 1:
+        states = [r.get("grasp") for r in records]
+        fixed, grasp_debounced = debounce_grasp(states, hand2gripper.grasp_min_frames)
+        for r, s in zip(records, fixed):
+            if r.get("grasp") is not None:
+                r["grasp"] = s
+
     metadata = {
         "session": str(session_dir),
         "source": f"WiLoR kpts_3d -> hand2gripper.{type(hand2gripper).__name__}",
         "hand2gripper_mode": hand2gripper.mode_label,
         "hand_key": args.hand_key,
+        # Recorded so an exported trajectory can be traced to the grasp settings
+        # that produced it - these need per-task tuning and change the events.
+        "grasp_detection": {
+            "close_ratio": hand2gripper.grasp_close_ratio,
+            "open_ratio": hand2gripper.grasp_open_ratio,
+            "min_frames": hand2gripper.grasp_min_frames,
+            "debounced_frames": grasp_debounced,
+            "signal": "tip_distance / palm_size, hysteresis band [close_ratio, open_ratio]",
+        },
         "units": "meters",
         "base_frame": {
             "x": "robot base +x as provided",
@@ -279,7 +355,8 @@ def main() -> None:
         choices=sorted(MODES),
         help="Hand-to-gripper definition. 'humanego' reproduces upstream HumanEgo; "
              "'pinch_plane' keeps the MCP jaw axis but drops the thumb from the "
-             "forward-axis reference.",
+             "forward-axis reference; 'finger_center_f_primary' keeps the four-finger "
+             "MCP forward direction fixed and projects the jaw direction off it.",
     )
     parser.add_argument(
         "--forward-seed",
@@ -287,6 +364,27 @@ def main() -> None:
         choices=list(PinchPlaneMode.FORWARD_SEEDS),
         help=f"Forward-axis seed for --hand2gripper-mode pinch_plane "
              f"(default: {PinchPlaneMode.DEFAULT_FORWARD_SEED}).",
+    )
+    parser.add_argument(
+        "--grasp-close-ratio", type=float, default=None,
+        help=f"tip_distance/palm_size below which the gripper counts as closed "
+             f"(default: {HumanEgoMode.DEFAULT_GRASP_CLOSE_RATIO}). Needs per-task tuning: "
+             f"stack_bowl's ratio peaks at ~0.9 while stack_object reaches ~1.4, so one "
+             f"global value cannot serve both. Try 0.40/0.50 for stack_bowl, "
+             f"0.50/0.55 for stack_object.",
+    )
+    parser.add_argument(
+        "--grasp-open-ratio", type=float, default=None,
+        help=f"tip_distance/palm_size above which the gripper counts as open "
+             f"(default: {HumanEgoMode.DEFAULT_GRASP_OPEN_RATIO}). Must be >= "
+             f"--grasp-close-ratio; the gap between them is the hysteresis band that "
+             f"stops the state chattering when the ratio sits near the threshold.",
+    )
+    parser.add_argument(
+        "--grasp-min-frames", type=int, default=None,
+        help=f"Drop open/closed runs shorter than this many frames "
+             f"(default: {HumanEgoMode.DEFAULT_GRASP_MIN_FRAMES}, i.e. no debouncing). "
+             f"Absorbs one-frame excursions from an occlusion or a bad reconstruction.",
     )
     args = parser.parse_args()
     export_eef(args)

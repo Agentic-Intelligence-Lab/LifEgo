@@ -25,7 +25,7 @@ of videos, which is the more common way to use --exp.
 
 Options:
   --exp NAME            write export/IK/replays under outputs/experiments/NAME/
-  --hand2gripper-mode M humanego (default) or pinch_plane; forwarded to the export stage
+  --hand2gripper-mode M humanego (default), pinch_plane, qwen, or finger_center_f_primary
   --forward-seed S      index_tip (default) or finger_mcp_centroid; pinch_plane only
 
 Environment overrides:

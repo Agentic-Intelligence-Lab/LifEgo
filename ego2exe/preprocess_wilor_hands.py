@@ -163,7 +163,43 @@ def recover_absolute_3d_from_intrinsics(
     return kpts_3d_cam
 
 
-def build_hand_json(det: dict[str, Any], K: np.ndarray) -> dict[str, Any] | None:
+def principal_point_shear(K: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Re-express a `pred_cam_t_full` point against this camera's real principal point.
+
+    `pred_cam_t_full` comes out of wilor_mini's `cam_crop_to_full`, which places
+    the translation relative to the IMAGE CENTRE: the projection it implies is
+    `u = f*X/Z + width/2`, not `u = fx*X/Z + cx`.  Our K carries the calibrated
+    principal point - (656.7, 358.0) against a 1280x720 centre of (640, 360) -
+    so reading WiLoR's output through K puts every keypoint a constant
+    `(cx - width/2, cy - height/2)` pixels away from where WiLoR itself says the
+    hand is.  Measured on this camera: (16.73, -1.99) px, standard deviation
+    (0.06, 0.02) px across a session, i.e. a fixed bias, not noise.  At the
+    ~0.47 m working distance that is ~8.6 mm of lateral error in every exported
+    trajectory.
+
+    A point (X, Y, Z) that WiLoR means to sit at pixel u therefore belongs at
+    `X + Z*(width/2 - cx)/fx`, so that projecting it through the real K lands on
+    that same pixel.  That is the shear returned here.  Each keypoint is scaled
+    by its own Z and depth is left untouched, so this fixes the lateral offset
+    only - the scale ambiguity that sets Z is a separate problem.
+    """
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+    return np.array(
+        [
+            [1.0, 0.0, (0.5 * width - cx) / fx],
+            [0.0, 1.0, (0.5 * height - cy) / fy],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+
+
+def build_hand_json(
+    det: dict[str, Any],
+    K: np.ndarray,
+    image_size: tuple[int, int] | None = None,
+) -> dict[str, Any] | None:
     preds = det.get("wilor_preds")
     if preds is None or "pred_keypoints_3d" not in preds or "pred_cam_t_full" not in preds:
         return None
@@ -176,12 +212,19 @@ def build_hand_json(det: dict[str, Any], K: np.ndarray) -> dict[str, Any] | None
 
     kpts_3d_cam = kpts_3d_rel + cam_t[None, :]
     depth_source = "pred_cam_t_full"
+    principal_point_corrected = False
+    if image_size is not None:
+        # Only the pred_cam_t_full branch needs this - the fallback below builds
+        # its point from kpts_2d through the real K, so it is already consistent.
+        kpts_3d_cam = kpts_3d_cam @ principal_point_shear(K, *image_size).T
+        principal_point_corrected = True
     wrist_z = float(kpts_3d_cam[0, 2]) if kpts_3d_cam.shape == (21, 3) else np.inf
     if not np.all(np.isfinite(kpts_3d_cam)) or not (0.05 < wrist_z < 3.0):
         if kpts_2d is None:
             return None
         kpts_3d_cam = recover_absolute_3d_from_intrinsics(kpts_2d, kpts_3d_rel, K)
         depth_source = "assets_intrinsics_wrist_middle_mcp_scale"
+        principal_point_corrected = False
     if kpts_3d_cam is None or kpts_3d_cam.shape != (21, 3) or not np.all(np.isfinite(kpts_3d_cam)):
         return None
 
@@ -194,6 +237,9 @@ def build_hand_json(det: dict[str, Any], K: np.ndarray) -> dict[str, Any] | None
         "keypoint_order": "wilor_mano_21",
         "coordinate_frame": "camera",
         "depth_source": depth_source,
+        # False here means kpts_3d carries the ~8.6 mm lateral bias described in
+        # principal_point_shear - i.e. the record predates that fix.
+        "principal_point_corrected": principal_point_corrected,
         "kpts_3d": to_jsonable(kpts_3d_cam),
         "kpts_2d": to_jsonable(kpts_2d),
         "pred_keypoints_3d_root_relative": to_jsonable(kpts_3d_rel),
@@ -411,7 +457,7 @@ def process_video(video_path: Path, out_root: Path, pipe: Any, hand_conf: float)
 
         for det in detections:
             is_right = bool(float(det.get("is_right", 1.0)) >= 0.5)
-            hand = build_hand_json(det, K)
+            hand = build_hand_json(det, K, (width, height))
             if hand is None:
                 continue
             if is_right:
@@ -460,6 +506,13 @@ def process_video(video_path: Path, out_root: Path, pipe: Any, hand_conf: float)
         "keypoint_order": "wilor_mano_21",
         "camera_intrinsics_source": "assets",
         "K": K.tolist(),
+        # A session without this flag was reconstructed before the fix and its
+        # kpts_3d carry a fixed lateral bias - see principal_point_shear.
+        "principal_point_correction": {
+            "applied": True,
+            "pixel_offset_removed": [float(K[0, 2] - 0.5 * width), float(K[1, 2] - 0.5 * height)],
+            "scope": "kpts_3d from the pred_cam_t_full depth source; depth is unchanged",
+        },
         "raw_output_file": "wilor_hands.json",
         "processed_output_file": "wilor_hands_processed.json",
     }
