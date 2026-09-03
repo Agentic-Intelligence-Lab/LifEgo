@@ -263,7 +263,11 @@ def find_ego_csv(session_dir: Path, subdir: str = "robot_eef_scene_camera_axis_c
 
 
 def load_real_dir(
-    path: Path, pose_key: str = "tcp_tip_pose", tcp_offset_m: float = DEFAULT_TCP_OFFSET_M
+    path: Path,
+    pose_key: str = "tcp_tip_pose",
+    tcp_offset_m: float = DEFAULT_TCP_OFFSET_M,
+    max_real: int | None = None,
+    episode_names: list[str] | None = None,
 ) -> list[Traj]:
     """Load a real-robot reference set, refusing an ego directory by mistake.
 
@@ -274,8 +278,32 @@ def load_real_dir(
     episodes and destroy the noise floor, so a motionless "demonstration" is
     treated as a hard error rather than a warning: no genuine teleop episode has
     a stationary TCP.
+
+    ``max_real`` keeps only the first N files in filename (i.e. capture-time)
+    order. A reference set recorded by two operators carries their difference in
+    its own dispersion - stack_bowl's floor is 24.6 mm pooled but 20.3-20.5 mm
+    within either operator - which deflates every rho measured against it.
+    Trimming to one operator's block is the blunt fix; note it also shrinks n,
+    and the floor gets unreliable below ~10 episodes.
+
+    ``episode_names`` selects an explicit ordered subset, such as the held-out
+    ``eval`` block of an anchor-correction split manifest.  When it is supplied,
+    ``max_real`` is intentionally ignored: silently capping an explicit split
+    would change the reference set and invalidate the train/eval separation.
     """
-    out = [load_real_jsonl(f, pose_key, tcp_offset_m=tcp_offset_m) for f in sorted(path.glob("*.jsonl"))]
+    if episode_names is not None:
+        files = [path / name for name in episode_names]
+        missing = [p for p in files if not p.is_file()]
+        if missing:
+            raise FileNotFoundError(
+                f"Explicit real episode list references missing files under {path}: "
+                f"{[p.name for p in missing]}"
+            )
+    else:
+        files = sorted(path.glob("*.jsonl"))
+    if episode_names is None and max_real:  # None or 0 both mean "no cap"
+        files = files[:max_real]
+    out = [load_real_jsonl(f, pose_key, tcp_offset_m=tcp_offset_m) for f in files]
     trajs = [t for t in out if t is not None]
     if trajs:
         spans = [float(np.linalg.norm(t.pos.max(axis=0) - t.pos.min(axis=0))) for t in trajs]

@@ -99,6 +99,10 @@ def main() -> None:
                     help="comma-separated key order for rows (default: task,variant,pipeline)")
     ap.add_argument("--show-constant", action="store_true",
                     help="show constant columns in full instead of collapsing them to '='")
+    ap.add_argument(
+        "--allow-reference-mismatch", action="store_true",
+        help="compare reports that use different real reference sets (unsafe for rho comparisons).",
+    )
     args = ap.parse_args()
 
     reports, warnings = load(args.paths)
@@ -106,6 +110,27 @@ def main() -> None:
         print(f"[warn] {w}", file=sys.stderr)
     if not reports:
         raise SystemExit("no comparable reports found")
+
+    reference_problems = []
+    for task in sorted({r["_key"]["task"] for r in reports}):
+        task_reports = [r for r in reports if r["_key"]["task"] == task]
+        ids = {
+            (r.get("real_reference") or {}).get("reference_set_id")
+            for r in task_reports
+        }
+        if len(ids) > 1:
+            reference_problems.append(
+                f"{task}: " + ", ".join("unrecorded" if value is None else value for value in sorted(ids, key=str))
+            )
+    if reference_problems and not args.allow_reference_mismatch:
+        raise SystemExit(
+            "real reference sets differ within the same task; rho denominators are not comparable:\n  "
+            + "\n  ".join(reference_problems)
+            + "\nRe-run every pipeline against the same split, or pass --allow-reference-mismatch "
+              "for a deliberate diagnostic."
+        )
+    for problem in reference_problems:
+        print(f"[warn] reference-set mismatch: {problem}", file=sys.stderr)
 
     metrics = ([m.strip() for m in args.metric.split(',') if m.strip()]
                if args.metric else DEFAULT_METRICS)

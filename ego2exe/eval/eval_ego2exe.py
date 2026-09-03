@@ -37,7 +37,9 @@ episode regardless.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -280,6 +282,11 @@ def eval_variant_name(args: argparse.Namespace) -> str:
         parts.append("nofilter")
     if args.pose_key != "tcp_tip_pose":
         parts.append(args.pose_key)
+    if args.real_split_manifest:
+        stem = re.sub(r"[^a-zA-Z0-9._-]+", "-", Path(args.real_split_manifest).stem)
+        parts.append(f"rs-{stem}-{args.real_split}")
+    elif args.max_real:  # 0 means "no cap", matching load_real_dir's convention
+        parts.append(f"real{args.max_real}")
     return "_".join(parts) if parts else "full"
 
 
@@ -340,8 +347,101 @@ def resolve_inputs(args: argparse.Namespace) -> tuple[Path, list[Path], Path | N
             as_abs(args.out) if args.out else None, "")
 
 
+def resolve_real_reference(args: argparse.Namespace, real_dir: Path) -> dict:
+    """Resolve and fingerprint the exact real episodes used by this run."""
+    if args.real_split_manifest:
+        manifest_path = as_abs(args.real_split_manifest)
+        if not manifest_path.is_file():
+            raise SystemExit(f"--real-split-manifest not found: {manifest_path}")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if args.task and manifest.get("task") != args.task:
+            raise SystemExit(
+                f"real split task mismatch: manifest has {manifest.get('task')!r}, "
+                f"evaluation requested {args.task!r}"
+            )
+        names = manifest.get(args.real_split)
+        if not isinstance(names, list) or not names:
+            raise SystemExit(
+                f"split {args.real_split!r} is empty or absent in {manifest_path}"
+            )
+        if len(names) != len(set(names)):
+            raise SystemExit(f"split {args.real_split!r} contains duplicate episode names")
+        selected = [str(name) for name in names]
+        mode = "manifest"
+    else:
+        manifest_path = None
+        files = sorted(real_dir.glob("*.jsonl"))
+        if args.max_real:
+            files = files[:args.max_real]
+        selected = [path.name for path in files]
+        mode = "filename_prefix" if args.max_real else "all"
+
+    fingerprint_payload = json.dumps(
+        {
+            "real_dir": str(real_dir.resolve()),
+            "episode_names": selected,
+            "pose_key": args.pose_key,
+            "tcp_offset_m": args.tcp_offset_m,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    reference_set_id = hashlib.sha256(fingerprint_payload).hexdigest()[:16]
+    return {
+        "mode": mode,
+        "manifest": str(manifest_path.resolve()) if manifest_path else None,
+        "split": args.real_split if manifest_path else None,
+        "reference_set_id": reference_set_id,
+        "episode_names": selected,
+    }
+
+
+def check_real_leakage(
+    ego_dirs: list[Path],
+    ego_subdir: str,
+    eval_names: list[str],
+    *,
+    allow: bool,
+) -> dict:
+    """Refuse evaluation when correction calibration episodes enter its reference set."""
+    calibration_names: set[str] = set()
+    metadata_files: list[str] = []
+    for session_dir in ego_dirs:
+        candidates = [session_dir / ego_subdir / "anchor_correction_meta.json"]
+        candidates.extend(sorted(session_dir.glob("*/anchor_correction_meta.json")))
+        meta_path = next((path for path in candidates if path.is_file()), None)
+        if meta_path is None:
+            continue
+        metadata_files.append(str(meta_path.resolve()))
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        calibration_names.update(str(name) for name in meta.get("real_split", {}).get("calibration", []))
+
+    overlap = sorted(calibration_names.intersection(eval_names))
+    if overlap and not allow:
+        raise SystemExit(
+            "REAL-DATA LEAKAGE: the evaluation reference set overlaps the real episodes used "
+            f"to calibrate these corrected trajectories ({len(overlap)} file(s)): {overlap}.\n"
+            "Evaluate with the split manifest's held-out eval block. Pass --allow-real-leakage "
+            "only for an explicitly non-held-out diagnostic."
+        )
+    return {
+        "checked_correction_metadata_files": len(metadata_files),
+        "calibration_episode_names": sorted(calibration_names),
+        "overlap_episode_names": overlap,
+        "override_used": bool(overlap and allow),
+    }
+
+
 def run(args: argparse.Namespace) -> dict:
     real_dir, ego_dirs, out_dir, label = resolve_inputs(args)
+    real_reference = resolve_real_reference(args, real_dir)
+    leakage = check_real_leakage(
+        ego_dirs,
+        args.ego_subdir,
+        real_reference["episode_names"],
+        allow=args.allow_real_leakage,
+    )
+    real_reference["leakage_check"] = leakage
 
     print(RULE)
     print("ego2exe trajectory evaluation")
@@ -349,10 +449,18 @@ def run(args: argparse.Namespace) -> dict:
     if label:
         print(f"{label}")
     print(f"real : {real_dir}")
-    reals = load_real_dir(real_dir, args.pose_key, args.tcp_offset_m)
+    reals = load_real_dir(
+        real_dir,
+        args.pose_key,
+        args.tcp_offset_m,
+        max_real=None,
+        episode_names=real_reference["episode_names"],
+    )
     print(f"       {len(reals)} episodes, "
           f"{np.mean([t.duration_s for t in reals]):.1f} s mean, "
           f"grasp events {sorted({len(t.events) for t in reals})}")
+    print(f"       reference {real_reference['reference_set_id']} "
+          f"({real_reference['mode']}{':' + real_reference['split'] if real_reference['split'] else ''})")
     if len(reals) < args.min_real:
         print(f"  [warn] only {len(reals)} real episodes; the noise floor is unreliable "
               f"below ~{args.min_real}. Treat every rho below as provisional.")
@@ -454,7 +562,7 @@ def run(args: argparse.Namespace) -> dict:
           f"({len(reals_scope)} real, {len(egos_scope)} ego in scope)\n{THIN}")
     # Everything that can change the real-vs-real block goes into the key.
     cache_key = None if args.no_cache else "|".join(str(x) for x in (
-        real_dir, args.pose_key, args.tcp_offset_m,
+        real_dir, real_reference["reference_set_id"], args.pose_key, args.tcp_offset_m,
         args.segment_start, args.segment_end, N_RESAMPLE,
     ))
     book = DistanceBook(reals_scope + egos_scope, cache_key=cache_key)
@@ -699,6 +807,7 @@ def run(args: argparse.Namespace) -> dict:
         "ego_dirs": [str(p) for p in ego_dirs],
         "n_real": len(reals),
         "n_ego": len(egos),
+        "real_reference": real_reference,
         "anchors_selected": anchors_sel,
         # What produced this report. Without pose_key/tcp_offset_m recorded here,
         # two reports cannot be told apart when the TCP convention changes - the
@@ -710,6 +819,10 @@ def run(args: argparse.Namespace) -> dict:
             "variant": eval_variant_name(args) if args.task else None,
             "pose_key": args.pose_key,
             "tcp_offset_m": args.tcp_offset_m,
+            "max_real": args.max_real,
+            "real_split_manifest": real_reference["manifest"],
+            "real_split": real_reference["split"],
+            "reference_set_id": real_reference["reference_set_id"],
             "ego_subdir": args.ego_subdir,
             "ego_hz": args.ego_hz,
         },
@@ -813,6 +926,26 @@ def main() -> None:
                    help="fingertip offset along the flange's local +X, metres (NERO default 0.18; "
                         "see ego2exe/README.md 'site:tcp'). Only used by --pose-key tcp_tip_pose.")
     p.add_argument("--bbox-margin", type=float, default=0.02, help="workspace bbox margin, metres")
+    p.add_argument("--max-real", type=int, default=10,
+                   help="use only the first N real episodes, in capture-time order (default: 10). "
+                        "A reference set recorded by two operators carries their difference in its "
+                        "own dispersion, which deflates every rho measured against it - e.g. "
+                        "stack_bowl's floor is 24.6 mm pooled across two operators' full sets but "
+                        "20.3-20.5 mm within either one's block. 0 means no cap (all real episodes).")
+    p.add_argument(
+        "--real-split-manifest", default=None,
+        help="JSON split created by correct_eef_with_real_anchors.py. When supplied, load the "
+             "exact names in --real-split and ignore --max-real.",
+    )
+    p.add_argument(
+        "--real-split", choices=("calibration", "eval", "reserve"), default="eval",
+        help="block selected from --real-split-manifest (default: eval).",
+    )
+    p.add_argument(
+        "--allow-real-leakage", action="store_true",
+        help="allow corrected trajectories to be evaluated against calibration episodes. "
+             "This is rejected by default because it is not a held-out estimate.",
+    )
     p.add_argument("--min-real", type=int, default=10,
                    help="warn below this many real episodes; the noise floor gets unreliable")
     p.add_argument("--knn-k", type=int, default=3, help="k for the manifold-overlap radius")
