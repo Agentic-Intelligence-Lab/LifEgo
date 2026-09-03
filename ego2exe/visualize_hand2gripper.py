@@ -16,6 +16,10 @@ draws the resulting gripper (EEF) target directly in the camera frame:
   - Grasp state (open/closed) plus the thumb-tip/index-tip pinch distance that
     drives it, drawn as a small marker + line so the open/close decision is
     visually checkable against the actual finger gap.
+  - With ``--eef``, the exact exported/debounced grasp state used by correction,
+    an anchor-event banner around every toggle, and a bottom timeline marking
+    A0/A1/etc.  The anchor coordinate is the frame immediately before the
+    transition; the following frame is labelled as the new-state frame.
   - A text block with idx/hand/confidence/grasp/EEF pose printed in the robot
     *base* frame (`T_ee_in_base`, same axis-corrected pose `preprocess_export_eef.py`
     exports by default) rather than the camera frame, since that's what
@@ -66,6 +70,148 @@ DEPTH_SOURCE_LABELS = {
     "pred_cam_t_full": "cam_t",
     "assets_intrinsics_wrist_middle_mcp_scale": "scale_fallback",
 }
+
+EVENT_COLOR = (0, 215, 255)  # amber, BGR
+TEXT_COLOR = (245, 245, 245)
+
+
+def load_eef_grasp_events(path: Path) -> tuple[dict[int, int], list[dict]]:
+    """Load the exact exported/debounced grasp sequence used by correction.
+
+    An anchor is the valid trajectory sample immediately *before* a binary
+    transition, matching ``eval.traj_metrics.grasp_events`` and
+    ``correct_eef_with_real_anchors.py``.  Keeping both before/after frame IDs
+    lets the video distinguish the anchor coordinate from the first frame in
+    the new state.
+    """
+    data = json.loads(path.read_text(encoding="utf-8"))
+    samples: list[tuple[int, int]] = []
+    for rec in data.get("records", []):
+        if not rec.get("valid") or rec.get("grasp") is None:
+            continue
+        samples.append((int(rec["idx"]), int(float(rec["grasp"]) > 0.5)))
+    if not samples:
+        raise ValueError(f"No valid grasp samples found in EEF trajectory: {path}")
+
+    states = {idx: state for idx, state in samples}
+    events = []
+    for i in range(len(samples) - 1):
+        before_frame, before = samples[i]
+        after_frame, after = samples[i + 1]
+        if before == after:
+            continue
+        events.append({
+            "anchor_index": len(events),
+            "before_frame": before_frame,
+            "after_frame": after_frame,
+            "before_state": before,
+            "after_state": after,
+        })
+    return states, events
+
+
+def state_name(state: int | None) -> str:
+    if state is None:
+        return "N/A"
+    return "CLOSED" if state else "OPEN"
+
+
+def draw_grasp_event_overlay(
+    frame: np.ndarray,
+    *,
+    frame_idx: int,
+    state: int | None,
+    events: list[dict],
+    selected_anchors: set[int],
+    hold_frames: int,
+    frame_range: tuple[int, int] | None,
+    source_label: str,
+) -> None:
+    """Draw current state, an event flash, and an anchor timeline."""
+    h, w = frame.shape[:2]
+    color = CLOSED_COLOR if state else OPEN_COLOR if state is not None else (180, 180, 180)
+    status = f"GRASP: {state_name(state)}  [{source_label}]"
+    (tw, th), _ = cv2.getTextSize(status, cv2.FONT_HERSHEY_SIMPLEX, 0.72, 2)
+    x0 = max((w - tw) // 2 - 12, 4)
+    x1 = min(x0 + tw + 24, w - 4)
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x0, 8), (x1, 8 + th + 18), (10, 10, 10), -1)
+    cv2.addWeighted(overlay, 0.65, frame, 0.35, 0, frame)
+    cv2.rectangle(frame, (x0, 8), (x1, 8 + th + 18), color, 2, cv2.LINE_AA)
+    cv2.putText(frame, status, (x0 + 12, 8 + th + 7), cv2.FONT_HERSHEY_SIMPLEX,
+                0.72, color, 2, cv2.LINE_AA)
+
+    nearby = [
+        event for event in events
+        if event["anchor_index"] in selected_anchors
+        and event["before_frame"] - hold_frames <= frame_idx <= event["after_frame"] + hold_frames
+    ]
+    if nearby:
+        event = min(
+            nearby,
+            key=lambda item: min(abs(frame_idx - item["before_frame"]), abs(frame_idx - item["after_frame"])),
+        )
+        anchor = event["anchor_index"]
+        exact_anchor = frame_idx == event["before_frame"]
+        changed = frame_idx == event["after_frame"]
+        if exact_anchor:
+            phase = "ANCHOR COORDINATE (transition after this frame)"
+        elif changed:
+            phase = "GRASP CHANGED (first frame in new state)"
+        elif frame_idx < event["before_frame"]:
+            phase = f"approaching anchor in {event['before_frame'] - frame_idx} frame(s)"
+        else:
+            phase = f"{frame_idx - event['after_frame']} frame(s) after transition"
+        title = (
+            f"ANCHOR[{anchor}] / EVENT {anchor + 1}: "
+            f"{state_name(event['before_state'])} -> {state_name(event['after_state'])}"
+        )
+        subtitle = (
+            f"{phase}   frames {event['before_frame']} -> {event['after_frame']}"
+        )
+        scale = 0.68 if w >= 900 else 0.52
+        title_w = cv2.getTextSize(title, cv2.FONT_HERSHEY_SIMPLEX, scale, 2)[0][0]
+        sub_w = cv2.getTextSize(subtitle, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1)[0][0]
+        box_w = min(max(title_w, sub_w) + 28, w - 16)
+        bx0 = max((w - box_w) // 2, 8)
+        by0 = 58
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (bx0, by0), (bx0 + box_w, by0 + 62), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.72, frame, 0.28, 0, frame)
+        thickness = 4 if exact_anchor or changed else 2
+        cv2.rectangle(frame, (bx0, by0), (bx0 + box_w, by0 + 62), EVENT_COLOR,
+                      thickness, cv2.LINE_AA)
+        cv2.putText(frame, title, (bx0 + 14, by0 + 25), cv2.FONT_HERSHEY_SIMPLEX,
+                    scale, EVENT_COLOR, 2, cv2.LINE_AA)
+        cv2.putText(frame, subtitle, (bx0 + 14, by0 + 49), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.48, TEXT_COLOR, 1, cv2.LINE_AA)
+
+    if frame_range is None:
+        return
+    first_frame, last_frame = frame_range
+    span = max(last_frame - first_frame, 1)
+    tx0, tx1, ty = 150, max(w - 30, 151), h - 30
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (tx0 - 8, ty - 23), (tx1 + 8, ty + 18), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
+    cv2.line(frame, (tx0, ty), (tx1, ty), (170, 170, 170), 2, cv2.LINE_AA)
+
+    def timeline_x(idx: int) -> int:
+        alpha = np.clip((idx - first_frame) / span, 0.0, 1.0)
+        return int(round(tx0 + alpha * (tx1 - tx0)))
+
+    for event in events:
+        anchor = event["anchor_index"]
+        if anchor not in selected_anchors:
+            continue
+        x = timeline_x(event["before_frame"])
+        cv2.line(frame, (x, ty - 10), (x, ty + 10), EVENT_COLOR, 2, cv2.LINE_AA)
+        cv2.putText(frame, f"A{anchor}", (x - 9, ty - 13), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.42, EVENT_COLOR, 1, cv2.LINE_AA)
+    current_x = timeline_x(frame_idx)
+    cv2.circle(frame, (current_x, ty), 5, (255, 255, 255), -1, cv2.LINE_AA)
+    cv2.putText(frame, "grasp anchors", (12, ty + 5), cv2.FONT_HERSHEY_SIMPLEX,
+                0.48, TEXT_COLOR, 1, cv2.LINE_AA)
 
 
 def make_hand2gripper_mode(
@@ -232,10 +378,10 @@ def render_hand(
     show_skeleton: bool,
     T_cam_in_base: np.ndarray,
     axis_correction: np.ndarray | None,
-) -> bool:
+) -> tuple[bool, int | None]:
     confidence = float(hand.get("confidence", 0.0))
     if confidence < min_confidence:
-        return False
+        return False, None
 
     if show_skeleton and hand.get("kpts_2d") is not None:
         draw_skeleton(frame, hand, skel_color)
@@ -243,7 +389,7 @@ def render_hand(
     target = mode.from_hand_record(hand)
     if target is None:
         draw_info_block(frame, [f"{label} conf={confidence:.2f}", "hand2gripper: FAILED"], info_corner, skel_color)
-        return True
+        return True, None
 
     draw_pinch(frame, K, target)
     T_eef_in_cam_display = target.T_eef_in_cam.copy()
@@ -270,7 +416,7 @@ def render_hand(
     ]
     text_color = CLOSED_COLOR if target.grasp_state else OPEN_COLOR
     draw_info_block(frame, lines, info_corner, text_color)
-    return True
+    return True, int(target.grasp_state)
 
 
 def load_config(session_dir: Path) -> dict:
@@ -294,14 +440,43 @@ def main() -> None:
         help="Print the raw camera->base EEF pose instead of the axis-corrected one preprocess_export_eef.py exports by default",
     )
     parser.add_argument(
-        "--hand2gripper-mode", default=HumanEgoMode.MODE_NAME, choices=sorted(MODES),
-        help="Hand-to-gripper definition to visualize; matches preprocess_export_eef.py",
+        "--hand2gripper-mode", default=None, choices=sorted(MODES),
+        help="Hand-to-gripper definition. With --eef, infer it from trajectory metadata; "
+             f"otherwise default to {HumanEgoMode.MODE_NAME}.",
     )
     parser.add_argument(
         "--forward-seed", default=None, choices=list(PinchPlaneMode.FORWARD_SEEDS),
         help=f"Forward-axis seed for pinch_plane (default: {PinchPlaneMode.DEFAULT_FORWARD_SEED})",
     )
+    parser.add_argument(
+        "--eef", default="",
+        help="Optional robot_eef_trajectory.json whose exported/debounced grasp events define "
+             "the anchors. Pass a corrected trajectory to show exactly the anchors used by correction.",
+    )
+    parser.add_argument(
+        "--anchors", type=int, nargs="*", default=None,
+        help="Only highlight these zero-based grasp-event indices (default: all events).",
+    )
+    parser.add_argument(
+        "--event-hold-frames", type=int, default=12,
+        help="Show the event banner this many frames before/after a transition (default: 12).",
+    )
+    parser.add_argument(
+        "--event-hand", choices=("hand_r", "hand_l"), default="hand_r",
+        help="Hand used for the live grasp overlay when --eef is omitted (default: hand_r).",
+    )
+    parser.add_argument(
+        "--no-grasp-event-overlay", action="store_true",
+        help="Disable the large grasp-state/event banner and bottom anchor timeline.",
+    )
     args = parser.parse_args()
+
+    if args.event_hold_frames < 0:
+        raise SystemExit("--event-hold-frames must be non-negative")
+    if args.anchors is not None and (
+        any(k < 0 for k in args.anchors) or len(set(args.anchors)) != len(args.anchors)
+    ):
+        raise SystemExit(f"--anchors must be unique non-negative indices, got {args.anchors}")
 
     session_dir = Path(args.session)
     all_data_dir = session_dir / "preprocess" / "all_data"
@@ -316,6 +491,42 @@ def main() -> None:
         raise SystemExit(f"wilor_hands_config.json under {session_dir} is missing camera intrinsics 'K'")
     json_name = "wilor_hands_processed.json" if args.processed else "wilor_hands.json"
 
+    eef_states: dict[int, int] = {}
+    grasp_events: list[dict] = []
+    if args.eef:
+        eef_path = Path(args.eef)
+        if not eef_path.is_file():
+            raise SystemExit(f"--eef trajectory not found: {eef_path}")
+        eef_states, grasp_events = load_eef_grasp_events(eef_path)
+        eef_metadata = json.loads(eef_path.read_text(encoding="utf-8")).get("metadata", {})
+        mode_spec = str(eef_metadata.get("hand2gripper_mode") or "")
+        if args.hand2gripper_mode is None and mode_spec:
+            mode_name, _, mode_detail = mode_spec.partition(":")
+            if mode_name in MODES:
+                args.hand2gripper_mode = mode_name
+            if args.forward_seed is None and mode_detail in PinchPlaneMode.FORWARD_SEEDS:
+                args.forward_seed = mode_detail
+        if args.anchors is not None:
+            missing = [k for k in args.anchors if k >= len(grasp_events)]
+            if missing:
+                raise SystemExit(
+                    f"--eef contains {len(grasp_events)} grasp event(s), so anchors {missing} do not exist"
+                )
+        print(f"[visualize_hand2gripper] EEF grasp events: {len(grasp_events)} from {eef_path}")
+        for event in grasp_events:
+            print(
+                f"  anchor[{event['anchor_index']}] frame {event['before_frame']} -> "
+                f"{event['after_frame']}: {state_name(event['before_state'])} -> "
+                f"{state_name(event['after_state'])}"
+            )
+    if args.hand2gripper_mode is None:
+        args.hand2gripper_mode = HumanEgoMode.MODE_NAME
+    print(
+        f"[visualize_hand2gripper] hand2gripper mode: {args.hand2gripper_mode}"
+        + (f":{args.forward_seed}" if args.hand2gripper_mode == PinchPlaneMode.MODE_NAME and args.forward_seed else "")
+    )
+    selected_anchors = set(args.anchors) if args.anchors is not None else set(range(len(grasp_events)))
+
     out_path = Path(args.out) if args.out else session_dir / "preprocess" / "vis" / "hand2gripper_vis.mp4"
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -327,6 +538,10 @@ def main() -> None:
     n_written = 0
     n_right = 0
     n_left = 0
+    eef_last_state: int | None = None
+    live_last_state: int | None = None
+    live_last_frame: int | None = None
+    live_events: list[dict] = []
     for frame_dir in frame_dirs:
         rgb_path = frame_dir / "rgb.png"
         json_path = frame_dir / json_name
@@ -337,22 +552,30 @@ def main() -> None:
             continue
         record = json.loads(json_path.read_text())
         width = frame.shape[1]
+        try:
+            frame_idx = int(frame_dir.name)
+        except ValueError:
+            frame_idx = n_written
 
         hand_r = record.get("hand_r")
+        state_r = None
         if hand_r is not None:
-            n_right += int(render_hand(
+            rendered, state_r = render_hand(
                 frame, K, hand_r, mode_r, "R", RIGHT_COLOR, args.axis_length_m,
                 args.min_confidence, (12, 40), not args.no_skeleton,
                 T_cam_in_base, axis_correction,
-            ))
+            )
+            n_right += int(rendered)
 
         hand_l = record.get("hand_l")
+        state_l = None
         if hand_l is not None:
-            n_left += int(render_hand(
+            rendered, state_l = render_hand(
                 frame, K, hand_l, mode_l, "L", LEFT_COLOR, args.axis_length_m,
                 args.min_confidence, (max(width - 260, 12), 40), not args.no_skeleton,
                 T_cam_in_base, axis_correction,
-            ))
+            )
+            n_left += int(rendered)
 
         cv2.putText(
             frame, frame_dir.name, (12, 24),
@@ -360,6 +583,48 @@ def main() -> None:
         )
         height = frame.shape[0]
         draw_base_axes_gizmo(frame, T_base_in_cam[:3, :3], (70, height - 90))
+
+        if not args.no_grasp_event_overlay:
+            if eef_states:
+                if frame_idx in eef_states:
+                    eef_last_state = eef_states[frame_idx]
+                display_state = eef_last_state
+                display_events = grasp_events
+                display_selected = selected_anchors
+                frame_range = (min(eef_states), max(eef_states))
+                source_label = "exported/debounced EEF"
+            else:
+                display_state = state_r if args.event_hand == "hand_r" else state_l
+                if display_state is not None:
+                    if live_last_state is not None and display_state != live_last_state:
+                        live_events.append({
+                            "anchor_index": len(live_events),
+                            "before_frame": live_last_frame if live_last_frame is not None else frame_idx - 1,
+                            "after_frame": frame_idx,
+                            "before_state": live_last_state,
+                            "after_state": display_state,
+                        })
+                    live_last_state = display_state
+                    live_last_frame = frame_idx
+                display_events = live_events
+                display_selected = (
+                    set(args.anchors) if args.anchors is not None else set(range(len(live_events)))
+                )
+                try:
+                    frame_range = (int(frame_dirs[0].name), int(frame_dirs[-1].name))
+                except ValueError:
+                    frame_range = (0, len(frame_dirs) - 1)
+                source_label = f"live {args.event_hand} (not debounced)"
+            draw_grasp_event_overlay(
+                frame,
+                frame_idx=frame_idx,
+                state=display_state,
+                events=display_events,
+                selected_anchors=display_selected,
+                hold_frames=args.event_hold_frames,
+                frame_range=frame_range,
+                source_label=source_label,
+            )
 
         if writer is None:
             h, w = frame.shape[:2]
