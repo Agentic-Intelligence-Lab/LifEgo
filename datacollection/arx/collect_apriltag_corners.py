@@ -39,7 +39,8 @@ With single-arm hand-guided gravity compensation:
 
     python datacollection/arx/collect_apriltag_corners.py \\
         --arm left --tag-ids 1 2 3 --tag-size-m 0.05 --tcp-offset X Y Z \\
-        --drag-teach
+        --drag-teach \\
+        --urdf-path datacollection/arx/models/X5-2025-gripper-handle-0p65kg.urdf
 """
 
 from __future__ import annotations
@@ -95,6 +96,27 @@ def parse_args() -> argparse.Namespace:
         default=2,
         choices=sorted(ARM_TYPE_NAMES),
         help="ARX model type: 0=X5-2023, 2=X5-2025, 3=A5 (default: 2).",
+    )
+    parser.add_argument(
+        "--urdf-path",
+        type=Path,
+        default=None,
+        help=(
+            "Optional custom URDF path for ARX gravity compensation. Relative paths "
+            "are resolved under this LifEgo checkout. Use a copied URDF here instead "
+            "of editing /home/arx/ARX5_beta."
+        ),
+    )
+    parser.add_argument(
+        "--gravity-scale",
+        nargs=6,
+        type=float,
+        default=None,
+        metavar=("J1", "J2", "J3", "J4", "J5", "J6"),
+        help=(
+            "Optional per-joint gravity compensation scale passed to ARX SDK, e.g. "
+            "--gravity-scale 1 1 1 1 1 1. Prefer tuning link6 mass first."
+        ),
     )
     parser.add_argument(
         "-n",
@@ -183,6 +205,13 @@ def parse_args() -> argparse.Namespace:
         args.out = DEFAULT_OUT_DIR / f"tag_corners_base_arx_{args.arm}.json"
     if args.can_port is None:
         args.can_port = DEFAULT_CAN_PORTS[args.arm]
+    if args.urdf_path is not None:
+        args.urdf_path = args.urdf_path.expanduser()
+        if not args.urdf_path.is_absolute():
+            args.urdf_path = REPO_ROOT / args.urdf_path
+        args.urdf_path = args.urdf_path.resolve()
+        if not args.urdf_path.exists():
+            parser.error(f"--urdf-path does not exist: {args.urdf_path}")
     return args
 
 
@@ -285,12 +314,21 @@ def collect(args: argparse.Namespace) -> None:
     SingleArm = import_arx_sdk(args.arx_sdk_root)
     tcp_offset = np.asarray(args.tcp_offset, dtype=np.float64)
     print_link6_frame_hint(tcp_offset)
+    arm_config: dict[str, Any] = {"can_port": args.can_port, "type": args.arm_type}
+    if args.urdf_path is not None:
+        arm_config["urdf_path"] = str(args.urdf_path)
+    if args.gravity_scale is not None:
+        arm_config["gravity_scale"] = args.gravity_scale
     print(
         f"Connecting ARX {args.arm} arm: can_port={args.can_port} "
         f"type={args.arm_type} ({ARM_TYPE_NAMES[args.arm_type]})"
     )
+    if args.urdf_path is not None:
+        print(f"Using custom URDF for gravity compensation: {args.urdf_path}")
+    if args.gravity_scale is not None:
+        print(f"Using gravity_scale: {args.gravity_scale}")
 
-    arm = SingleArm({"can_port": args.can_port, "type": args.arm_type})
+    arm = SingleArm(arm_config)
     aborted = False
 
     def on_int(_sig, _frame):
@@ -389,6 +427,8 @@ def collect(args: argparse.Namespace) -> None:
         "can_port": args.can_port,
         "arm_type": args.arm_type,
         "arm_type_name": ARM_TYPE_NAMES[args.arm_type],
+        "urdf_path": None if args.urdf_path is None else str(args.urdf_path),
+        "gravity_scale": args.gravity_scale,
         "corner_captured": "top_left",
         "tag_size_m": args.tag_size_m,
         "tcp_offset_m": tcp_offset.tolist(),
