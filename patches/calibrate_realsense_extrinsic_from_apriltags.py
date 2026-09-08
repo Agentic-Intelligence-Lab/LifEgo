@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Calibrate a fixed RealSense camera's extrinsics relative to the NERO robot base frame.
+"""Calibrate the ARX head RealSense camera's extrinsics from AprilTags.
 
 Method: PnP against desktop AprilTags whose top_left corner has a known 3D
 position in the robot base frame (measured by touching the robot TCP to that
@@ -30,14 +30,14 @@ matches collect_apriltag_corners.py's output):
     }
 
 Tag family: pass --tag-family with a short name -- 16h5, 25h9, 36h10, 36h11, or
-41h12 (default). 16h5/25h9/36h10/36h11 are detected via cv2.aruco (OpenCV ships
+41h12. 16h5/25h9/36h10/36h11 are detected via cv2.aruco (OpenCV ships
 these built in). 41h12 is not shipped by cv2.aruco, so it's detected via
 `pupil_apriltags` instead (pip install pupil-apriltags), which wraps the
 official AprilRobotics C library. Full names (DICT_APRILTAG_36h11,
 tagStandard41h12, ...) also work if you need them.
 
     --tag-family 36h11      # cv2.aruco
-    --tag-family 41h12      # pupil_apriltags (default)
+    --tag-family 41h12      # pupil_apriltags
 
 Input images: either point at existing photo(s) with --images, or have the
 script take the photo itself with --capture (RealSense by default; add more
@@ -48,13 +48,12 @@ script take the photo itself with --capture (RealSense by default; add more
         --images outputs/camera_extrinsics/captured/shot.png \\
         --tag-corners-base datacollection/pyAgxArm/tag_corners_base.json
 
-    # Let the script capture a photo itself (RealSense, default 1920x1080@8fps --
-    # that's the highest fps the D435i's RGB sensor supports at 1080p)
+    # Let the script capture a photo itself (ARX head D405, default 1280x720@30fps)
     python patches/calibrate_realsense_extrinsic_from_apriltags.py \\
         --capture --capture-count 3 \\
         --tag-corners-base datacollection/pyAgxArm/tag_corners_base.json
 
-    # Lower resolution instead (supports higher fps: 1280x720@15, 640x480@30, ...)
+    # Lower resolution instead
     python patches/calibrate_realsense_extrinsic_from_apriltags.py \\
         --capture --capture-width 1280 --capture-height 720 --capture-fps 15 \\
         --tag-corners-base datacollection/pyAgxArm/tag_corners_base.json
@@ -64,16 +63,10 @@ script take the photo itself with --capture (RealSense by default; add more
         --capture --capture-backend opencv --camera-index 1 \\
         --tag-corners-base datacollection/pyAgxArm/tag_corners_base.json
 
-Intrinsics: by default (no --intrinsics-json) intrinsics are looked up in the
-factory multi-resolution table patches/camera_insrinsics.json, keyed by
-whatever resolution was actually captured/used (--resolution is auto-set from
---capture-width/--capture-height, or from the first --images frame's real
-pixel size) -- so switching --capture-width/--capture-height (e.g. to 1080p)
-picks up the matching fx/fy/cx/cy automatically instead of silently reusing
-another resolution's numbers at the wrong scale. A resolution missing from
-that table falls back to patches/assets.py's single scene_rgb entry; a
-mismatch between the resolved intrinsics and the actual image size prints a
-[warn] rather than failing silently.
+Intrinsics: by default the script uses the ARX head D405's factory intrinsics
+at 1280x720, stored in datacollection/arx/configs/. Pass --intrinsics-json to
+calibrate another camera or resolution. A mismatch between the resolved
+intrinsics and the actual image size prints a [warn].
 
 Input JSON for --intrinsics-json (RealSense pyrealsense2.intrinsics-style
 fields also accepted: ppx/ppy in place of cx/cy, coeffs in place of
@@ -117,6 +110,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # the single fixed resolution hardcoded in patches/assets.py, so --capture-width/-height
 # (e.g. the 1920x1080 default) picks up matching intrinsics automatically.
 FACTORY_INTRINSICS_JSON = REPO_ROOT / "patches" / "camera_insrinsics.json"
+ARX_HEAD_CAMERA_SERIAL = "409122273248"
+ARX_HEAD_INTRINSICS_JSON = "datacollection/arx/configs/d405_head_1280x720_intrinsics.json"
 
 PNP_METHOD_ATTRS = {
     "sqpnp": "SOLVEPNP_SQPNP",
@@ -315,7 +310,7 @@ def get_aruco_dictionary(family: str):
 # a property of this specific print batch, not of cv2.aruco in general. This permutes
 # raw index -> our [top_left, top_right, bottom_right, bottom_left] convention (index 0 =
 # the corner the operator physically touches), matching what corners_from_top_left /
-# solve_joint_pose_and_yaws / solve_axis_aligned_pose all assume. If tags are reprinted
+# solve_joint_pose_and_yaws assumes. If tags are reprinted
 # or a different family/generator is used, re-verify with annotate_apriltags.py (its
 # red-dot label = index 0 after this reorder) before trusting this constant again.
 ARUCO_CORNER_REORDER = [2, 3, 0, 1]
@@ -637,63 +632,6 @@ def reprojection_error(
     return proj, per_point, rmse
 
 
-# The 4 ways two perpendicular tag edges can align with the base frame's x/y axes --
-# "axis-aligned" alone doesn't say whether the top_left->top_right edge runs along +x or
-# +y, only that it runs along ONE of them. 0/180 put it along x, 90/270 along y; which
-# one is physically correct depends on how the table happens to be oriented relative to
-# the robot base frame (empirically 90 deg for this rig, not the 0 deg first assumed --
-# see corners_from_top_left: at yaw=pi/2, handedness=+1, top_right = top_left + (0,
-# +size, 0) and bottom_left = top_left + (+size, 0, 0), matching what was verified
-# against the physical tags). Searched automatically below rather than hardcoded, so
-# this doesn't need re-guessing if the rig's orientation convention changes again.
-AXIS_ALIGNED_YAW_CANDIDATES_DEG = [0.0, 90.0, 180.0, 270.0]
-
-
-def solve_axis_aligned_pose(
-    top_lefts: dict[int, np.ndarray],
-    tag_ids: list[int],
-    size: float,
-    image_points_by_tag: dict[int, np.ndarray],
-    K: np.ndarray,
-    dist: np.ndarray,
-    pnp_method: str,
-) -> tuple[np.ndarray, np.ndarray, float, float, float]:
-    """Alternative to solve_joint_pose_and_yaws for tags stuck down parallel to the
-    robot base's x/y axes ("水平竖直"): assume the same fixed cardinal yaw (0/90/180/270
-    deg -- see AXIS_ALIGNED_YAW_CANDIDATES_DEG) for every tag instead of solving each
-    tag's yaw independently, so top_right/bottom_right/bottom_left are computed directly
-    from the measured top_left corner by offsetting x/y by +-tag_size at the same z
-    (reuses corners_from_top_left with yaw fixed). This only holds if that physical
-    assumption is true -- if the tags are actually rotated off-axis on the table, this
-    method's computed corners are wrong and its reprojection error will be much higher
-    than solve_joint_pose_and_yaws's; compare the two before trusting this one.
-
-    No per-tag search needed since yaw is fixed (shared across all tags, unlike method
-    A): only which cardinal direction + chirality (which of the 2 axis-offset
-    directions is "right" vs "down") is ambiguous, so all 4 yaws x 2 chirality signs
-    (8 combos total, still O(1) in the number of tags) are tried via a direct PnP solve
-    each and the lower-RMSE one is kept. Returns (rvec, tvec, chirality, assumed_yaw_deg,
-    reprojection_rmse_px).
-    """
-    image_points = np.concatenate([image_points_by_tag[t] for t in tag_ids], axis=0)
-    best = None  # (rmse, handedness, yaw_deg, rvec, tvec)
-    for handedness in (1.0, -1.0):
-        for yaw_deg in AXIS_ALIGNED_YAW_CANDIDATES_DEG:
-            yaw = np.deg2rad(yaw_deg)
-            obj = np.concatenate([corners_from_top_left(top_lefts[t], size, yaw, handedness) for t in tag_ids], axis=0)
-            try:
-                rvec, tvec, _ = solve_pnp(obj, image_points, K, dist, pnp_method)
-            except RuntimeError:
-                continue
-            _, _, rmse = reprojection_error(obj, image_points, K, dist, rvec, tvec)
-            if best is None or rmse < best[0]:
-                best = (rmse, handedness, yaw_deg, rvec, tvec)
-    if best is None:
-        raise RuntimeError("axis-aligned PnP failed to converge for every yaw x chirality candidate")
-    rmse, handedness, yaw_deg, rvec, tvec = best
-    return rvec, tvec, handedness, yaw_deg, rmse
-
-
 def leave_one_out_tag_diagnostics(
     top_lefts: dict[int, np.ndarray],
     tag_ids: list[int],
@@ -757,7 +695,6 @@ def draw_debug_image(
     img: np.ndarray,
     detections: dict[int, np.ndarray],
     proj_by_tag: dict[int, np.ndarray],
-    proj_by_tag_axis_aligned: dict[int, np.ndarray] | None = None,
 ) -> np.ndarray:
     vis = img.copy()
     for tag_id, corners in detections.items():
@@ -776,15 +713,7 @@ def draw_debug_image(
         cv2.polylines(vis, [pts], True, (0, 0, 255), 1)
         for x, y in pts:
             cv2.circle(vis, (int(x), int(y)), 3, (0, 0, 255), -1)
-    if proj_by_tag_axis_aligned:
-        for tag_id, proj in proj_by_tag_axis_aligned.items():
-            pts = proj.astype(int)
-            cv2.polylines(vis, [pts], True, (0, 200, 255), 1)  # orange, BGR
-            for x, y in pts:
-                cv2.circle(vis, (int(x), int(y)), 3, (0, 200, 255), -1)
     legend = "green=detected  red=yaw-solve reprojected"
-    if proj_by_tag_axis_aligned:
-        legend += "  orange=axis-aligned reprojected"
     cv2.putText(vis, legend, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
     cv2.putText(vis, "digits=corner idx (0=top_left)", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
     return vis
@@ -1032,50 +961,16 @@ def calibrate(args: argparse.Namespace) -> None:
     T_base_in_cam[:3, 3] = tvec.flatten()
     T_cam_in_base = np.linalg.inv(T_base_in_cam)
 
-    # Second method for comparison: assume every tag shares the same fixed cardinal yaw
-    # (edges axis-aligned with the base frame -- "水平竖直", searched over 0/90/180/270
-    # deg) instead of solving each tag's yaw independently. Same tags/pixels/intrinsics,
-    # independent PnP solve -- see solve_axis_aligned_pose's docstring for when this
-    # assumption is (and isn't) valid.
-    rvec_aa, tvec_aa, handedness_aa, yaw_deg_aa, rmse_aa = solve_axis_aligned_pose(
-        used_top_lefts, tags_used, tag_size, image_points_by_tag, K, dist, args.pnp_method
-    )
-    yaw_aa = np.deg2rad(yaw_deg_aa)
-    R_mat_aa, _ = cv2.Rodrigues(rvec_aa)
-    T_base_in_cam_aa = np.eye(4, dtype=np.float64)
-    T_base_in_cam_aa[:3, :3] = R_mat_aa
-    T_base_in_cam_aa[:3, 3] = tvec_aa.flatten()
-    T_cam_in_base_aa = np.linalg.inv(T_base_in_cam_aa)
-
-    method_position_delta_mm = float(
-        np.linalg.norm(T_cam_in_base[:3, 3] - T_cam_in_base_aa[:3, 3]) * 1000.0
-    )
-    method_rotation_delta_deg = float(
-        np.degrees((R.from_matrix(R_mat).inv() * R.from_matrix(R_mat_aa)).magnitude())
-    )
-
-    # Per-tag, per-corner base-frame 3D comparison: both methods compute
-    # top_right/bottom_right/bottom_left from the same measured top_left point and
-    # tag_size -- they only disagree on yaw (solved independently per-tag for method A,
-    # one shared fixed cardinal value for every tag for method B), so this is pure
-    # geometry, independent of the camera solve above. top_left itself is identical
-    # (it's the measured input, not derived) so its delta is always 0; the other 3
-    # corners show directly how far off the axis-aligned assumption is, in the base frame.
+    # The solved tag yaw and chirality determine all four base-frame corners from the
+    # physically measured top-left corner and the known tag side length.
     corner_labels = ["top_left", "top_right", "bottom_right", "bottom_left"]
-    tag_corners_by_method: dict[str, dict[int, dict[str, list[float]]]] = {"yaw_solve": {}, "axis_aligned": {}}
-    tag_corners_delta_mm: dict[int, dict[str, float]] = {}
+    tag_corners_base: dict[int, dict[str, list[float]]] = {}
     for t in tags_used:
-        obj_y = corners_from_top_left(used_top_lefts[t], tag_size, np.deg2rad(yaw_by_tag[t]), handedness)
-        obj_a = corners_from_top_left(used_top_lefts[t], tag_size, yaw_aa, handedness_aa)
-        tag_corners_by_method["yaw_solve"][t] = {lbl: obj_y[i].tolist() for i, lbl in enumerate(corner_labels)}
-        tag_corners_by_method["axis_aligned"][t] = {lbl: obj_a[i].tolist() for i, lbl in enumerate(corner_labels)}
-        tag_corners_delta_mm[t] = {
-            lbl: float(np.linalg.norm(obj_y[i] - obj_a[i]) * 1000.0) for i, lbl in enumerate(corner_labels)
-        }
+        corners = corners_from_top_left(used_top_lefts[t], tag_size, np.deg2rad(yaw_by_tag[t]), handedness)
+        tag_corners_base[t] = {lbl: corners[i].tolist() for i, lbl in enumerate(corner_labels)}
 
-    # Per-image diagnostics: reproject both methods' solutions into each raw frame,
-    # and (when a frame alone has >=4 points) solve PnP standalone against the
-    # yaw-solve method to check consistency with the pooled result (large deltas
+    # Per-image diagnostics reproject the solved pose into each raw frame and, when a
+    # frame alone has >=4 points, solve PnP standalone to check consistency (large deltas
     # usually mean the camera moved between shots or a frame's detection is bad).
     r_global = R.from_matrix(R_mat)
     per_image_diag = []
@@ -1097,17 +992,10 @@ def calibrate(args: argparse.Namespace) -> None:
         img_here = np.concatenate([known[tid] for tid in sorted(known)], axis=0)
         proj_here, _, rmse_here = reprojection_error(obj_here, img_here, K, dist, rvec, tvec)
 
-        obj_here_aa = np.concatenate(
-            [corners_from_top_left(used_top_lefts[tid], tag_size, yaw_aa, handedness_aa) for tid in sorted(known)],
-            axis=0,
-        )
-        proj_here_aa, _, rmse_here_aa = reprojection_error(obj_here_aa, img_here, K, dist, rvec_aa, tvec_aa)
-
         diag = {
             "image": str(path),
             "tags_detected": sorted(known.keys()),
             "reprojection_rmse_px": rmse_here,
-            "reprojection_rmse_px_axis_aligned": rmse_here_aa,
             "standalone_rotation_delta_deg": None,
             "standalone_translation_delta_mm": None,
         }
@@ -1125,13 +1013,11 @@ def calibrate(args: argparse.Namespace) -> None:
 
         if not args.no_debug_images:
             proj_by_tag = {}
-            proj_by_tag_aa = {}
             offset = 0
             for tid in sorted(known):
                 proj_by_tag[tid] = proj_here[offset : offset + 4]
-                proj_by_tag_aa[tid] = proj_here_aa[offset : offset + 4]
                 offset += 4
-            vis = draw_debug_image(entry["img"], detections, proj_by_tag, proj_by_tag_aa)
+            vis = draw_debug_image(entry["img"], detections, proj_by_tag)
             out_name = f"{path.stem}_reprojection.png"
             cv2.imwrite(str(debug_dir / out_name), vis)
 
@@ -1163,36 +1049,11 @@ def calibrate(args: argparse.Namespace) -> None:
         "T_cam_in_base": matrix_record(T_cam_in_base),
         "T_base_in_cam": matrix_record(T_base_in_cam),
         "camera_position_in_base_m": T_cam_in_base[:3, 3].tolist(),
-        "axis_aligned_method": {
-            "description": "Comparison method: same fixed cardinal yaw (searched over 0/90/180/270 "
-            "deg) for every tag instead of solved per-tag (assumes tags stuck down parallel to the "
-            "base x/y axes) -- see solve_axis_aligned_pose.",
-            "assumed_yaw_deg": yaw_deg_aa,
-            "chirality": handedness_aa,
-            "reprojection_rmse_px": rmse_aa,
-            "T_cam_in_base": matrix_record(T_cam_in_base_aa),
-            "T_base_in_cam": matrix_record(T_base_in_cam_aa),
-            "camera_position_in_base_m": T_cam_in_base_aa[:3, 3].tolist(),
-        },
-        "method_comparison": {
-            "position_delta_mm": method_position_delta_mm,
-            "rotation_delta_deg": method_rotation_delta_deg,
-            "reprojection_rmse_delta_px": rmse_aa - rmse_px,
-            "note": "delta = axis_aligned_method minus the primary (yaw-solve) T_cam_in_base above. "
-            "A small delta here is evidence the axis-aligned assumption holds for this rig; a large "
-            "one means the tags aren't actually axis-aligned and yaw-solve (the primary result) "
-            "should be trusted instead.",
-        },
-        "tag_corners_base_by_method": {
-            "description": "Each tag's 4 corners in the robot base frame (meters), independently for "
-            "both methods -- pure geometry from the measured top_left + tag_size + (yaw, chirality), "
-            "not dependent on the camera solve. top_left is identical in both (it's the measured "
-            "input, not derived); delta_mm shows how far method B's top_right/bottom_right/bottom_left "
-            "computation drifts from method A's per tag.",
+        "tag_corners_base": {
+            "description": "Each tag's 4 corners in the robot base frame (meters), computed from "
+            "the measured top_left corner, tag size, and Method A's solved yaw and chirality.",
             "corner_order": corner_labels,
-            "yaw_solve": {str(t): tag_corners_by_method["yaw_solve"][t] for t in tags_used},
-            "axis_aligned": {str(t): tag_corners_by_method["axis_aligned"][t] for t in tags_used},
-            "delta_mm": {str(t): tag_corners_delta_mm[t] for t in tags_used},
+            "corners": {str(t): tag_corners_base[t] for t in tags_used},
         },
     }
 
@@ -1205,35 +1066,14 @@ def calibrate(args: argparse.Namespace) -> None:
     print(f"Tags used: {tags_used}  (missing/not detected: {tags_missing})")
     print(f"PnP method: {method_used}  correspondences: {object_points.shape[0]}")
     print()
-    print("Method A (yaw-solve, primary/written to T_cam_in_base):")
+    print("Method A (yaw-solve):")
     print(f"  Solved yaw per tag (deg): {yaw_by_tag}  chirality: {handedness:+.0f}")
     print(f"  Reprojection RMSE: {rmse_px:.3f} px")
     print(f"  Camera position in base frame (m): {T_cam_in_base[:3, 3].tolist()}")
-    print("Method B (axis-aligned, same fixed cardinal yaw for every tag):")
-    print(f"  assumed yaw (deg): {yaw_deg_aa:.0f}  chirality: {handedness_aa:+.0f}")
-    print(f"  Reprojection RMSE: {rmse_aa:.3f} px")
-    print(f"  Camera position in base frame (m): {T_cam_in_base_aa[:3, 3].tolist()}")
-    print(
-        f"Method A vs B: position delta {method_position_delta_mm:.2f} mm, "
-        f"rotation delta {method_rotation_delta_deg:.3f} deg, "
-        f"RMSE delta {rmse_aa - rmse_px:+.3f} px"
-    )
-    print()
-    print("Per-tag corner base-frame coordinates (m), method A (yaw-solve) vs B (axis-aligned):")
-    for t in tags_used:
-        print(f"  tag {t}:")
-        for lbl in corner_labels:
-            py = tag_corners_by_method["yaw_solve"][t][lbl]
-            pa = tag_corners_by_method["axis_aligned"][t][lbl]
-            d = tag_corners_delta_mm[t][lbl]
-            py_s = "[" + ", ".join(f"{v:+.4f}" for v in py) + "]"
-            pa_s = "[" + ", ".join(f"{v:+.4f}" for v in pa) + "]"
-            print(f"    {lbl:13s} A={py_s}  B={pa_s}  delta={d:6.2f}mm")
     for diag in per_image_diag:
         if diag["standalone_rotation_delta_deg"] is not None:
             print(
-                f"  {Path(diag['image']).name}: rmse_A={diag['reprojection_rmse_px']:.3f}px "
-                f"rmse_B={diag['reprojection_rmse_px_axis_aligned']:.3f}px "
+                f"  {Path(diag['image']).name}: rmse={diag['reprojection_rmse_px']:.3f}px "
                 f"standalone_delta=({diag['standalone_rotation_delta_deg']:.3f}deg, "
                 f"{diag['standalone_translation_delta_mm']:.2f}mm)"
             )
@@ -1264,16 +1104,19 @@ def main() -> None:
         default="realsense",
         help="Camera backend for --capture (default: realsense / pyrealsense2).",
     )
-    parser.add_argument("--camera-serial", default="auto", help="RealSense serial for --capture-backend realsense.")
+    parser.add_argument(
+        "--camera-serial",
+        default=ARX_HEAD_CAMERA_SERIAL,
+        help=f"RealSense serial for --capture-backend realsense (default: ARX head D405 {ARX_HEAD_CAMERA_SERIAL}).",
+    )
     parser.add_argument("--camera-index", type=int, default=1, help="OpenCV camera index for --capture-backend opencv.")
-    parser.add_argument("--capture-width", type=int, default=1920)
-    parser.add_argument("--capture-height", type=int, default=1080)
+    parser.add_argument("--capture-width", type=int, default=1280)
+    parser.add_argument("--capture-height", type=int, default=720)
     parser.add_argument(
         "--capture-fps",
         type=int,
-        default=8,
-        help="Default 8: D435i's RGB sensor only supports 1920x1080 at up to 8fps (lower "
-        "resolutions support higher fps, e.g. 15 at 1280x720, 30 at 640x480). If "
+        default=30,
+        help="Default 30: ARX head D405 at 1280x720. If "
         "pipeline.start() fails, the error lists this device's supported width/height/fps combos.",
     )
     parser.add_argument("--capture-count", type=int, default=1, help="Number of frames to capture and average.")
@@ -1304,17 +1147,21 @@ def main() -> None:
     )
     parser.add_argument(
         "--tag-family",
-        default="41h12",
-        help="Tag family (default: 41h12). Short names: 16h5/25h9/36h10/36h11 (cv2.aruco) or "
+        default="36h11",
+        help="Tag family (default: 36h11). Short names: 16h5/25h9/36h10/36h11 (cv2.aruco) or "
         "41h12 (pupil_apriltags -- pip install pupil-apriltags; cv2.aruco doesn't ship it). "
         "Full names (DICT_APRILTAG_36h11, tagStandard41h12, ...) also accepted.",
     )
-    parser.add_argument("--intrinsics-json", default=None, help="JSON with fx/fy/cx(ppx)/cy(ppy)/dist_coeffs(coeffs).")
+    parser.add_argument(
+        "--intrinsics-json",
+        default=ARX_HEAD_INTRINSICS_JSON,
+        help="JSON with fx/fy/cx(ppx)/cy(ppy)/dist_coeffs(coeffs). Defaults to the ARX head D405 at 1280x720.",
+    )
     parser.add_argument(
         "--resolution",
         default=None,
-        help="Resolution key (e.g. '1920x1080') to select from the intrinsics source's "
-        "by_resolution map (the factory patches/camera_insrinsics.json by default, or "
+        help="Resolution key (e.g. '1280x720') to select from the intrinsics source's "
+        "by_resolution map (the ARX head D405 file by default, or "
         "--intrinsics-json's own map if given). Usually not needed: auto-set from "
         "--capture-width/--capture-height when --capture is used, otherwise from the first "
         "--images frame's actual pixel size.",
